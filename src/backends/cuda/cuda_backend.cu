@@ -45,21 +45,23 @@ public:
         if (cublas_handle_) cublasDestroy(cublas_handle_);
     }
 
-    Buffer* create_buffer(const std::vector<size_t>& shape) override {
+    Buffer* create_buffer(const std::vector<size_t>& shape) {
         size_t total_elements = 1;
         for (auto d : shape) total_elements *= d;
         size_t size = total_elements * sizeof(float);
 
         void* ptr = nullptr;
-        cudaError_t err = cudaMallocManaged(&ptr, size);
-        
-        if (err != cudaSuccess) {
-            std::cerr << "[Lumen] CUDA Alloc Error: " << cudaGetErrorString(err) << std::endl;
-            return nullptr;
+        cudaMallocManaged(&ptr, size); // Unified Memory
+
+        // Calculate strides
+        std::vector<size_t> strides(shape.size());
+        size_t s = 1;
+        for (int i = (int)shape.size() - 1; i >= 0; --i) {
+            strides[i] = s;
+            s *= shape[i];
         }
 
-        // FIX: Added nullptr as the 5th argument (Runtime* rt)
-        return new Buffer(shape, ptr, ptr, this, nullptr);
+        return new Buffer(shape, strides, ptr, ptr, this, 0);
     }
 
     void free_buffer(void* device_ptr) override {

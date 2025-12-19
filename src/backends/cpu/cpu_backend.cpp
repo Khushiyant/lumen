@@ -30,12 +30,21 @@ public:
         #endif
     }
 
-    Buffer* create_buffer(const std::vector<size_t>& shape) override {
+    Buffer* create_buffer(const std::vector<size_t>& shape) {
         size_t total_elements = 1;
         for (auto d : shape) total_elements *= d;
         float* ptr = new float[total_elements];
-        // FIX: Added nullptr as the 5th argument (Runtime* rt)
-        return new Buffer(shape, ptr, ptr, this, nullptr);
+
+        // Calculate default contiguous strides
+        std::vector<size_t> strides(shape.size());
+        size_t s = 1;
+        for (int i = (int)shape.size() - 1; i >= 0; --i) {
+            strides[i] = s;
+            s *= shape[i];
+        }
+
+        // Pass: shape, strides, device_ptr, host_ptr, creator, offset
+        return new Buffer(shape, strides, ptr, ptr, this, 0);
     }
 
     void free_buffer(void* device_ptr) override {
@@ -48,48 +57,31 @@ public:
     }
 
     void sync(std::vector<QueuedOp>& queue) override {
-        for (const auto& op : queue) {
-            float* out = static_cast<float*>(op.output->data());
+    for (const auto& op : queue) {
+        if (op.op_name == "relu") {
+            Buffer* in_buf = op.inputs[0];
+            Buffer* out_buf = op.output;
             
-            if (op.op_name == "add") {
-                float* A = static_cast<float*>(op.inputs[0]->data());
-                float* B = static_cast<float*>(op.inputs[1]->data());
-                size_t size = op.output->size_bytes() / sizeof(float);
-                
-                #ifdef __APPLE__
-                    vDSP_vadd(A, 1, B, 1, out, 1, size);
-                #else
-                    for (size_t i = 0; i < size; ++i) out[i] = A[i] + B[i];
-                #endif
-            } 
-            else if (op.op_name == "matmul") {
-                float* A = static_cast<float*>(op.inputs[0]->data());
-                float* B = static_cast<float*>(op.inputs[1]->data());
-                
-                long M = (long)op.inputs[0]->shape()[0];
-                long K = (long)op.inputs[0]->shape()[1];
-                long N = (long)op.inputs[1]->shape()[1];
+            float* in_data = (float*)in_buf->data();
+            float* out_data = (float*)out_buf->data();
 
-                #ifdef __APPLE__
-                    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, 
-                                M, N, K, 1.0f, A, K, B, N, 0.0f, out, N);
-                #elif defined(LUMEN_USE_OPENBLAS)
-                    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, 
-                                (int)M, (int)N, (int)K, 
-                                1.0f, A, (int)K, B, (int)N, 0.0f, out, (int)N);
-                #else
-                    std::memset(out, 0, M * N * sizeof(float));
-                    for (int m = 0; m < M; ++m) {
-                        for (int n = 0; n < N; ++n) {
-                            float sum = 0.0f;
-                            for (int k = 0; k < K; ++k) sum += A[m * K + k] * B[k * N + n];
-                            out[m * N + n] = sum;
-                        }
-                    }
-                #endif
+            auto& shape = in_buf->shape();
+            auto& in_strides = in_buf->strides();
+            auto& out_strides = out_buf->strides();
+
+            // For a 2D Tensor (generalized to N-D would use recursion or a flat iterator)
+            for (size_t i = 0; i < shape[0]; ++i) {
+                for (size_t j = 0; j < shape[1]; ++j) {
+                    // Calculate exact memory positions using strides
+                    size_t in_idx = i * in_strides[0] + j * in_strides[1];
+                    size_t out_idx = i * out_strides[0] + j * out_strides[1];
+                    
+                    out_data[out_idx] = std::max(0.0f, in_data[in_idx]);
+                }
             }
         }
     }
+}
 };
 
 std::unique_ptr<Backend> create_cpu_backend() {

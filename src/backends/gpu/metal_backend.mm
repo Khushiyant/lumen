@@ -71,18 +71,21 @@ public:
             for (const auto& op : queue) {
                 NSMutableArray<MPSGraphTensor*> *ins = [NSMutableArray array];
                 for (Buffer* buf : op.inputs) {
-                    if (buffer_to_tensor.count(buf)) {
-                        [ins addObject:buffer_to_tensor[buf]];
-                    } else {
-                        NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
-                        for (auto d : buf->shape()) [ns_shape addObject:@(d)];
-                        
-                        MPSGraphTensor *ph = [graph placeholderWithShape:ns_shape dataType:MPSDataTypeFloat32 name:nil];
-                        [ins addObject:ph];
-                        [orderedPlaceholders addObject:ph];
-                        [inputsArray addObject:[[MPSGraphTensorData alloc] initWithMTLBuffer:(__bridge id<MTLBuffer>)buf->device_handle() shape:ns_shape dataType:MPSDataTypeFloat32]];
-                        buffer_to_tensor[buf] = ph;
-                    }
+                    // 1. Convert Lumen shape and strides to NSNumber arrays
+                    NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
+                    NSMutableArray<NSNumber *> *ns_strides = [NSMutableArray array];
+                    for (auto d : buf->shape()) [ns_shape addObject:@(d)];
+                    for (auto s : buf->strides()) [ns_strides addObject:@(s * sizeof(float))]; // Metal wants byte strides
+
+                    // 2. Create a "Shaped Type" that includes the strides
+                    MPSGraphShapedType *shapedType = [[MPSGraphShapedType alloc] initWithShape:ns_shape 
+                                                                                    dataType:MPSDataTypeFloat32];
+                    
+                    // 3. Create TensorData using the buffer AND the byte strides
+                    MPSGraphTensorData *tensorData = [[MPSGraphTensorData alloc] initWithMTLBuffer:(__bridge id<MTLBuffer>)buf->device_handle()
+                                                                                            shape:ns_shape
+                                                                                        dataType:MPSDataTypeFloat32
+                                                                                    rowStrides:ns_strides];
                 }
 
                 MPSGraphTensor *res = nil;

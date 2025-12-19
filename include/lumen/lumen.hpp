@@ -37,28 +37,37 @@ public:
 
 class Buffer {
 public:
-    // Consistent 5-parameter signature
-    Buffer(const std::vector<size_t>& shape, void* device_ptr, void* host_ptr, Backend* creator, Runtime* rt);
+    // Added strides and offset for Zero-Copy Views
+    Buffer(const std::vector<size_t>& shape, const std::vector<size_t>& strides, 
+           void* device_ptr, void* host_ptr, Backend* creator, size_t offset = 0);
     ~Buffer();
     
     void* data(); 
     void set_runtime(Runtime* rt) { runtime_context_ = rt; }
     
     const std::vector<size_t>& shape() const { return shape_; }
+    const std::vector<size_t>& strides() const { return strides_; }
     size_t size_bytes() const;
-    void* device_handle() const { return device_ptr_; }
+    void* device_handle() const { return (char*)device_ptr_ + (offset_ * sizeof(float)); }
     Backend* creator() const { return creator_; }
+
+    // Pillar 5: Zero-Copy Views
+    // Returns a new Buffer sharing the same data but with different shape/strides
+    Buffer* view(const std::vector<size_t>& new_shape, const std::vector<size_t>& new_strides, size_t new_offset = 0);
 
     void set_location(BufferLocation loc) { location_ = loc; }
     BufferLocation location() const { return location_; }
 
 private:
     std::vector<size_t> shape_;
+    std::vector<size_t> strides_;
     void* device_ptr_; 
     void* host_ptr_;   
+    size_t offset_; // Offset from the start of the memory block
     Backend* creator_; 
-    Runtime* runtime_context_; 
+    Runtime* runtime_context_ = nullptr; 
     BufferLocation location_ = BufferLocation::BOTH_SYNCED;
+    bool is_view_ = false; // Prevents double-freeing shared memory
 };
 
 class Router {
