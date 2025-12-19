@@ -61,44 +61,43 @@ namespace lumen {
         #endif
 
         run_startup_benchmarks();
-        active_backend_name_ = backends_.count("cuda") ? "cuda" : (backends_.count("metal") ? "metal" : "cpu");
-        // Don't set active_backend_ yet so router can work by default
-        active_backend_ = nullptr; 
+        active_backend_name_ = "dynamic";
+        active_backend_ = nullptr; // Start in dynamic/routing mode
     }
 
     Runtime::~Runtime() { submit(); }
 
     void Runtime::run_startup_benchmarks() {
-    for (auto& [name, backend] : backends_) {
-        size_t dim = 256; 
-        auto start = std::chrono::high_resolution_clock::now();
-        auto* tA = backend->create_buffer({dim, dim});
-        auto* tB = backend->create_buffer({dim, dim});
-        auto* tC = backend->create_buffer({dim, dim});
-        
-        backend->execute("matmul", {tA, tB}, tC);
-        
-        auto end = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(end - start).count();
-        
-        // Throughput in Millions of Ops per second
-        metrics_[name]["matmul"] = {ms, (double)(dim * dim * dim) / (ms * 1e3)};
-        delete tA; delete tB; delete tC;
+        for (auto& [name, backend] : backends_) {
+            size_t dim = 256; // Larger test for better throughput estimation
+            auto start = std::chrono::high_resolution_clock::now();
+            auto* tA = backend->create_buffer({dim, dim});
+            auto* tB = backend->create_buffer({dim, dim});
+            auto* tC = backend->create_buffer({dim, dim});
+            
+            backend->execute("matmul", {tA, tB}, tC);
+            
+            auto end = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(end - start).count();
+            
+            // Store real throughput metrics
+            metrics_[name]["matmul"] = {ms, (double)(dim * dim * dim) / (ms * 1e3)};
+            delete tA; delete tB; delete tC;
+        }
     }
-}
     void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
-    // FIX: Only use the router if no manual backend was selected
-    Backend* target = active_backend_ ? active_backend_ : 
-                      router_->select_backend(op_name, output->shape(), backends_, metrics_);
-    
-    std::string target_name = active_backend_name_;
-    if (!active_backend_) {
-        for(auto& [n, p] : backends_) if(p.get() == target) target_name = n;
-    }
+        // FIX: Respect manual selection if active_backend_ is not null
+        Backend* target = active_backend_ ? active_backend_ : 
+                          router_->select_backend(op_name, output->shape(), backends_, metrics_);
+        
+        std::string target_name = active_backend_name_;
+        if (!active_backend_) {
+            for(auto& [n, p] : backends_) if(p.get() == target) target_name = n;
+        }
 
-    queue_.push_back({op_name, inputs, output, target_name});
-    output->set_location(BufferLocation::DEVICE_ONLY);
-}
+        queue_.push_back({op_name, inputs, output, target_name});
+        output->set_location(BufferLocation::DEVICE_ONLY);
+    }
 
     void Runtime::submit() {
         if (queue_.empty()) return;
@@ -140,6 +139,9 @@ namespace lumen {
         if (backends_.count(name)) {
             active_backend_ = backends_[name].get();
             active_backend_name_ = name;
+        } else if (name == "dynamic") {
+            active_backend_ = nullptr;
+            active_backend_name_ = "dynamic";
         }
     }
 

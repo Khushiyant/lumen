@@ -73,20 +73,20 @@ void benchmark_backend_comparison() {
     
     auto run_bench = [&](const std::string& backend) {
         rt.set_backend(backend);
-        // Ensure the backend is actually supported on this system
+        // Only run if the backend is actually active on this system
         if (rt.current_backend() != backend && backend != "cpu") return;
 
         auto* A = rt.alloc({dim, dim});
         auto* B = rt.alloc({dim, dim});
         auto* C = rt.alloc({dim, dim});
 
-        // Warmup
+        // Warmup: Build cache and ensure buffers are on device
         rt.execute("matmul", {A, B}, C);
         rt.submit(); 
 
         auto start = std::chrono::high_resolution_clock::now();
         rt.execute("matmul", {A, B}, C);
-        rt.submit(); // Measure the actual submission/execution time
+        rt.submit(); // Measure true execution
         auto end = std::chrono::high_resolution_clock::now();
 
         std::cout << "PASS: " << backend << " MatMul (" << dim << "x" << dim << ")" << std::endl;
@@ -96,7 +96,7 @@ void benchmark_backend_comparison() {
     };
 
     std::cout << "\n--- Performance Comparison ---" << std::endl;
-    run_bench("cuda");   // Now included for NVIDIA systems
+    run_bench("cuda");   
     run_bench("metal"); 
     run_bench("cpu");   
 }
