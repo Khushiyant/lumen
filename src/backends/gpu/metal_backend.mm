@@ -5,8 +5,15 @@
 #include <cmath>
 #include <iostream>
 #include <sstream>
+#include <map>
 
 namespace lumen {
+
+// Metadata structure to ensure execution matches compilation
+struct CachedPipeline {
+    MPSGraphExecutable *executable;
+    NSMutableArray<MPSGraphTensor *> *orderedPlaceholders;
+};
 
 class MetalBackend : public Backend {
 public:
@@ -25,8 +32,15 @@ public:
         size_t size = total_elements * sizeof(float);
         
         id<MTLBuffer> buf = [device_ newBufferWithLength:size options:MTLResourceStorageModeShared];
-        // FIX: Added nullptr as the 5th argument (Runtime* rt)
-        return new Buffer(shape, (__bridge_retained void*)buf, [buf contents], this, nullptr);
+
+        std::vector<size_t> strides(shape.size());
+        size_t s = 1;
+        for (int i = (int)shape.size() - 1; i >= 0; --i) {
+            strides[i] = s;
+            s *= shape[i];
+        }
+
+        return new Buffer(shape, strides, (__bridge_retained void*)buf, [buf contents], this, 0);
     }
 
     void free_buffer(void* device_ptr) override {
@@ -37,8 +51,7 @@ public:
     }
 
     void execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) override {
-        std::vector<QueuedOp> single_op_queue;
-        single_op_queue.push_back({op_name, inputs, output});
+        std::vector<QueuedOp> single_op_queue = {{op_name, inputs, output}};
         this->sync(single_op_queue);
     }
 
@@ -46,86 +59,121 @@ public:
         if (queue.empty()) return;
         
         @autoreleasepool {
-            std::stringstream key_builder;
-            for (const auto& op : queue) {
-                key_builder << op.op_name << "(";
-                for (auto* b : op.inputs) {
-                    for (auto d : b->shape()) key_builder << d << ",";
-                    key_builder << "|";
-                }
-                key_builder << ")->";
-                for (auto d : op.output->shape()) key_builder << d << ",";
-                key_builder << " ";
-            }
-            std::string cache_key = key_builder.str();
-
-            MPSGraphExecutable *executable = (__bridge MPSGraphExecutable*)pipeline_cache_[cache_key];
-            
-            MPSGraph *graph = [[MPSGraph alloc] init];
-            std::map<Buffer*, MPSGraphTensor*> buffer_to_tensor;
+            std::string cache_key = build_cache_key(queue);
             NSMutableArray<MPSGraphTensorData*> *inputsArray = [NSMutableArray array];
-            NSMutableArray<MPSGraphTensor*> *orderedPlaceholders = [NSMutableArray array];
-            NSMutableArray<MPSGraphTensor*> *targetTensors = [NSMutableArray array];
             NSMutableArray<MPSGraphTensorData*> *targetData = [NSMutableArray array];
 
-            for (const auto& op : queue) {
-                NSMutableArray<MPSGraphTensor*> *ins = [NSMutableArray array];
-                for (Buffer* buf : op.inputs) {
-                    // 1. Convert Lumen shape and strides to NSNumber arrays
-                    NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
-                    NSMutableArray<NSNumber *> *ns_strides = [NSMutableArray array];
-                    for (auto d : buf->shape()) [ns_shape addObject:@(d)];
-                    for (auto s : buf->strides()) [ns_strides addObject:@(s * sizeof(float))]; // Metal wants byte strides
+            // 1. Check Cache or Compile
+            if (pipeline_cache_.find(cache_key) == pipeline_cache_.end()) {
+                MPSGraph *graph = [[MPSGraph alloc] init];
+                std::map<Buffer*, MPSGraphTensor*> buffer_to_tensor;
+                NSMutableArray<MPSGraphTensor*> *orderedPlaceholders = [NSMutableArray array];
+                NSMutableArray<MPSGraphTensor*> *targetTensors = [NSMutableArray array];
 
-                    // 2. Create a "Shaped Type" that includes the strides
-                    MPSGraphShapedType *shapedType = [[MPSGraphShapedType alloc] initWithShape:ns_shape 
-                                                                                    dataType:MPSDataTypeFloat32];
-                    
-                    // 3. Create TensorData using the buffer AND the byte strides
-                    MPSGraphTensorData *tensorData = [[MPSGraphTensorData alloc] initWithMTLBuffer:(__bridge id<MTLBuffer>)buf->device_handle()
-                                                                                            shape:ns_shape
-                                                                                        dataType:MPSDataTypeFloat32
-                                                                                    rowStrides:ns_strides];
+                for (const auto& op : queue) {
+                    NSMutableArray<MPSGraphTensor*> *ins = [NSMutableArray array];
+                    for (Buffer* buf : op.inputs) {
+                        if (buffer_to_tensor.count(buf)) {
+                            [ins addObject:buffer_to_tensor[buf]];
+                        } else {
+                            NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
+                            for (auto d : buf->shape()) [ns_shape addObject:@(d)];
+                            
+                            MPSGraphTensor *ph = [graph placeholderWithShape:ns_shape dataType:MPSDataTypeFloat32 name:nil];
+                            [ins addObject:ph];
+                            [orderedPlaceholders addObject:ph];
+                            buffer_to_tensor[buf] = ph;
+                        }
+                    }
+
+                    MPSGraphTensor *res = nil;
+                    if (op.op_name == "add") res = [graph additionWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil];
+                    else if (op.op_name == "mul") res = [graph multiplicationWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil];
+                    else if (op.op_name == "matmul") res = [graph matrixMultiplicationWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil];
+
+                    if (res) {
+                        buffer_to_tensor[op.output] = res;
+                        [targetTensors addObject:res];
+                    }
                 }
 
-                MPSGraphTensor *res = nil;
-                if (op.op_name == "add") res = [graph additionWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil];
-                else if (op.op_name == "mul") res = [graph multiplicationWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil];
-                else if (op.op_name == "matmul") res = [graph matrixMultiplicationWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil];
-
-                if (res) {
-                    buffer_to_tensor[op.output] = res;
-                    [targetTensors addObject:res];
-                    NSMutableArray<NSNumber *> *out_shape = [NSMutableArray array];
-                    for (auto d : op.output->shape()) [out_shape addObject:@(d)];
-                    [targetData addObject:[[MPSGraphTensorData alloc] initWithMTLBuffer:(__bridge id<MTLBuffer>)op.output->device_handle() shape:out_shape dataType:MPSDataTypeFloat32]];
-                }
-            }
-
-            if (!executable) {
                 NSMutableDictionary *typeFeeds = [NSMutableDictionary dictionary];
-                for (NSUInteger i = 0; i < orderedPlaceholders.count; i++) {
-                    MPSGraphTensor *t = orderedPlaceholders[i];
-                    MPSGraphTensorData *d = inputsArray[i];
-                    typeFeeds[t] = [[MPSGraphShapedType alloc] initWithShape:d.shape dataType:d.dataType];
+                for (MPSGraphTensor *ph in orderedPlaceholders) {
+                    typeFeeds[ph] = [[MPSGraphShapedType alloc] initWithShape:ph.shape dataType:ph.dataType];
                 }
-                executable = [graph compileWithDevice:[MPSGraphDevice deviceWithMTLDevice:device_] 
-                                                feeds:typeFeeds targetTensors:targetTensors 
-                                     targetOperations:nil compilationDescriptor:nil];
-                pipeline_cache_[cache_key] = (__bridge_retained void*)executable;
+
+                MPSGraphExecutable *exe = [graph compileWithDevice:[MPSGraphDevice deviceWithMTLDevice:device_] 
+                                                             feeds:typeFeeds targetTensors:targetTensors 
+                                                  targetOperations:nil compilationDescriptor:nil];
+                
+                pipeline_cache_[cache_key] = {exe, orderedPlaceholders};
             }
 
-            [executable runWithMTLCommandQueue:command_queue_ 
-                                   inputsArray:inputsArray 
-                                  resultsArray:targetData 
-                           executionDescriptor:nil];
+            // 2. Map current buffers to the fixed placeholder order
+            const auto& pipeline = pipeline_cache_[cache_key];
+            std::map<Buffer*, MPSGraphTensorData*> current_data_map;
+            
+            for (const auto& op : queue) {
+                for (Buffer* buf : op.inputs) {
+                    if (current_data_map.find(buf) == current_data_map.end()) {
+                        current_data_map[buf] = create_tensor_data(buf);
+                    }
+                }
+                [targetData addObject:create_tensor_data(op.output)];
+            }
+
+            // Populate inputsArray in the EXACT order expected by the executable
+            // We use the queue topology to match buffers to the original placeholder positions
+            size_t placeholder_idx = 0;
+            std::map<Buffer*, bool> seen;
+            for (const auto& op : queue) {
+                for (Buffer* buf : op.inputs) {
+                    if (!seen[buf]) {
+                        [inputsArray addObject:current_data_map[buf]];
+                        seen[buf] = true;
+                        placeholder_idx++;
+                    }
+                }
+            }
+
+            [pipeline.executable runWithMTLCommandQueue:command_queue_ 
+                                           inputsArray:inputsArray 
+                                          resultsArray:targetData 
+                                   executionDescriptor:nil];
+
+            id<MTLCommandBuffer> commandBuffer = [command_queue_ commandBuffer];
+            [commandBuffer commit];
+            [commandBuffer waitUntilCompleted];
         }
     }
 
 private:
     id<MTLDevice> device_;
     id<MTLCommandQueue> command_queue_;
-    std::map<std::string, void*> pipeline_cache_;
+    std::map<std::string, CachedPipeline> pipeline_cache_;
+
+    std::string build_cache_key(const std::vector<QueuedOp>& queue) {
+        std::stringstream ss;
+        for (const auto& op : queue) {
+            ss << op.op_name << "(";
+            for (auto* b : op.inputs) {
+                for (auto d : b->shape()) ss << d << ",";
+                ss << "|";
+            }
+            ss << ")->";
+            for (auto d : op.output->shape()) ss << d << ",";
+            ss << " ";
+        }
+        return ss.str();
+    }
+
+    MPSGraphTensorData* create_tensor_data(Buffer* buf) {
+        NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
+        for (auto d : buf->shape()) [ns_shape addObject:@(d)];
+        return [[MPSGraphTensorData alloc] initWithMTLBuffer:(__bridge id<MTLBuffer>)buf->device_handle()
+                                                       shape:ns_shape
+                                                    dataType:MPSDataTypeFloat32];
+    }
 };
 
 std::unique_ptr<Backend> create_metal_backend() {

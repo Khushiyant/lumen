@@ -2,6 +2,7 @@
 #include <iostream>
 #include <numeric>
 #include <cstring>
+#include <chrono>
 
 namespace lumen {
 
@@ -20,7 +21,6 @@ namespace lumen {
           host_ptr_(host_ptr), offset_(offset), creator_(creator) {}
     
     Buffer::~Buffer() { 
-        // Only the "owner" buffer (not a view) frees the underlying device memory
         if (!is_view_ && runtime_context_) {
             runtime_context_->submit();
         }
@@ -30,9 +30,8 @@ namespace lumen {
     }
 
     Buffer* Buffer::view(const std::vector<size_t>& new_shape, const std::vector<size_t>& new_strides, size_t new_offset) {
-        // Create a new buffer object pointing to the same memory
         Buffer* v = new Buffer(new_shape, new_strides, device_ptr_, host_ptr_, creator_, offset_ + new_offset);
-        v->is_view_ = true; // Marks this as a non-owning reference
+        v->is_view_ = true; 
         v->set_runtime(this->runtime_context_);
         return v;
     }
@@ -62,9 +61,9 @@ namespace lumen {
         #endif
 
         run_startup_benchmarks();
-        
         active_backend_name_ = backends_.count("cuda") ? "cuda" : (backends_.count("metal") ? "metal" : "cpu");
-        active_backend_ = backends_[active_backend_name_].get();
+        // Don't set active_backend_ yet so router can work by default
+        active_backend_ = nullptr; 
     }
 
     Runtime::~Runtime() { submit(); }
@@ -85,9 +84,16 @@ namespace lumen {
     }
 
     void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
-        Backend* target = router_->select_backend(op_name, output->shape(), backends_, metrics_);
+        // Respect manual set_backend() if called, otherwise use router
+        Backend* target = active_backend_ ? active_backend_ : 
+                          router_->select_backend(op_name, output->shape(), backends_, metrics_);
+        
         std::string target_name = "cpu";
-        for(auto& [n, p] : backends_) if(p.get() == target) target_name = n;
+        if (active_backend_) {
+            target_name = active_backend_name_;
+        } else {
+            for(auto& [n, p] : backends_) if(p.get() == target) target_name = n;
+        }
 
         queue_.push_back({op_name, inputs, output, target_name});
         output->set_location(BufferLocation::DEVICE_ONLY);
@@ -96,7 +102,7 @@ namespace lumen {
     void Runtime::submit() {
         if (queue_.empty()) return;
 
-        // Move to local storage and clear immediately to prevent recursive sync issues
+        // Use local copy to prevent recursive sync issues
         std::vector<QueuedOp> current_queue = std::move(queue_);
         queue_.clear(); 
 
@@ -124,20 +130,8 @@ namespace lumen {
         Backend* allocator = backends_.count("cuda") ? backends_["cuda"].get() :
                              (backends_.count("metal") ? backends_["metal"].get() : backends_["cpu"].get());
         
-        // Calculate contiguous strides
-        // For shape (3, 4, 5), strides are (20, 5, 1)
-        std::vector<size_t> strides(shape.size());
-        size_t s = 1;
-        for (int i = shape.size() - 1; i >= 0; --i) {
-            strides[i] = s;
-            s *= shape[i];
-        }
-
-        Buffer* base = allocator->create_buffer(shape);
-        Buffer* buf = new Buffer(shape, strides, base->device_handle(), base->data(), allocator, 0);
+        Buffer* buf = allocator->create_buffer(shape);
         buf->set_runtime(this);
-        
-        delete base; // We only needed the raw handles from the backend temporary object
         return buf;
     }
 
@@ -149,7 +143,6 @@ namespace lumen {
     }
 
     std::string Runtime::current_backend() const { 
-        const_cast<Runtime*>(this)->submit();
-        return active_backend_name_; 
+        return active_backend_ ? active_backend_name_ : "dynamic"; 
     }
 }
