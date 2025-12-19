@@ -69,26 +69,23 @@ void test_metal_features() {
 // 3. Compare Performance: Metal vs CPU
 void benchmark_backend_comparison() {
     lumen::Runtime rt;
-    size_t dim = 1024; // 1024x1024 MatMul
+    size_t dim = 1024;
     
     auto run_bench = [&](const std::string& backend) {
         rt.set_backend(backend);
-        if (rt.current_backend() != backend) return;
+        // Only run if the backend is actually initialized
+        if (rt.current_backend() != backend && backend != "cpu") return;
 
         auto* A = rt.alloc({dim, dim});
         auto* B = rt.alloc({dim, dim});
         auto* C = rt.alloc({dim, dim});
 
-        // Warmup: Queue AND execute
         rt.execute("matmul", {A, B}, C);
-        rt.submit(); // Force hardware execution
+        rt.submit(); 
 
-        // Measure: Include the submission time
         auto start = std::chrono::high_resolution_clock::now();
-        
         rt.execute("matmul", {A, B}, C);
-        rt.submit(); // CRITICAL: This is where the actual work happens
-        
+        rt.submit();
         auto end = std::chrono::high_resolution_clock::now();
 
         std::cout << "PASS: " << backend << " MatMul (" << dim << "x" << dim << ")" << std::endl;
@@ -98,8 +95,9 @@ void benchmark_backend_comparison() {
     };
 
     std::cout << "\n--- Performance Comparison ---" << std::endl;
-    run_bench("metal"); // Expect Fast
-    run_bench("cpu");   // Expect Slow (Naive C++ loop)
+    run_bench("cuda");   // Added CUDA
+    run_bench("metal"); 
+    run_bench("cpu");   
 }
 
 void test_intelligent_routing() {

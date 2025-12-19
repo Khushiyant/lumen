@@ -69,35 +69,37 @@ namespace lumen {
     Runtime::~Runtime() { submit(); }
 
     void Runtime::run_startup_benchmarks() {
-        for (auto& [name, backend] : backends_) {
-            auto start = std::chrono::high_resolution_clock::now();
-            auto* tA = backend->create_buffer({100});
-            auto* tB = backend->create_buffer({100});
-            auto* tC = backend->create_buffer({100});
-            backend->execute("add", {tA, tB}, tC);
-            auto end = std::chrono::high_resolution_clock::now();
-            double ms = std::chrono::duration<double, std::milli>(end - start).count();
-            metrics_[name]["add"] = {ms, 100.0 / (ms + 1e-6)};
-            metrics_[name]["matmul"] = {ms * 5, 100.0 / (ms * 5 + 1e-6)};
-            delete tA; delete tB; delete tC;
-        }
+    for (auto& [name, backend] : backends_) {
+        // Benchmark a larger operation (e.g., 512x512 MatMul) to get real throughput
+        size_t dim = 512;
+        auto start = std::chrono::high_resolution_clock::now();
+        auto* tA = backend->create_buffer({dim, dim});
+        auto* tB = backend->create_buffer({dim, dim});
+        auto* tC = backend->create_buffer({dim, dim});
+        
+        backend->execute("matmul", {tA, tB}, tC); // Actual workload
+        
+        auto end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(end - start).count();
+        
+        metrics_[name]["matmul"] = {ms, (double)(dim * dim * dim) / (ms * 1e3)};
+        delete tA; delete tB; delete tC;
     }
+}
 
     void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
-        // Respect manual set_backend() if called, otherwise use router
-        Backend* target = active_backend_ ? active_backend_ : 
-                          router_->select_backend(op_name, output->shape(), backends_, metrics_);
-        
-        std::string target_name = "cpu";
-        if (active_backend_) {
-            target_name = active_backend_name_;
-        } else {
-            for(auto& [n, p] : backends_) if(p.get() == target) target_name = n;
-        }
-
-        queue_.push_back({op_name, inputs, output, target_name});
-        output->set_location(BufferLocation::DEVICE_ONLY);
+    // FIX: Respect manual override if active_backend_ is set
+    Backend* target = active_backend_ ? active_backend_ : 
+                      router_->select_backend(op_name, output->shape(), backends_, metrics_);
+    
+    std::string target_name = active_backend_name_;
+    if (!active_backend_) {
+        for(auto& [n, p] : backends_) if(p.get() == target) target_name = n;
     }
+
+    queue_.push_back({op_name, inputs, output, target_name});
+    output->set_location(BufferLocation::DEVICE_ONLY);
+}
 
     void Runtime::submit() {
         if (queue_.empty()) return;
