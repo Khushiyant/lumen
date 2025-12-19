@@ -1,10 +1,12 @@
 #include "lumen/lumen.hpp"
 #include <iostream>
-#include <chrono>
+#include <algorithm>
 
 #ifdef __APPLE__
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #import <Accelerate/Accelerate.h>
 #endif
 
@@ -16,208 +18,192 @@ Buffer::Buffer(size_t size, void* device_ptr, void* host_ptr)
 
 Buffer::~Buffer() {
 #ifdef __APPLE__
-    // Since we aren't using ARC, we cast back to id and set to nil 
-    // to let the system know we are done.
     id<MTLBuffer> mtlBuffer = (id<MTLBuffer>)device_ptr_;
     mtlBuffer = nil; 
 #endif
-    std::cout << "[Lumen] Buffer deallocated." << std::endl;
 }
 
 // --- Runtime Implementation ---
 Runtime::Runtime() {
-    std::cout << "[Lumen] Runtime Initialized on macOS." << std::endl;
-    
 #ifdef __APPLE__
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    mtl_device_ = (void*)device; 
-#else
-    mtl_device_ = nullptr;
+    mtl_device_ = (void*)device;
+    register_ops();
+    
+    // Auto-Tuning: Find the break-even point
+    calibrate_thresholds(); 
+    
+    std::cout << "[Lumen] Runtime Ready. Optimized Threshold: " 
+              << config_.cpu_to_npu_threshold << " elements." << std::endl;
 #endif
 }
 
 Runtime::~Runtime() {
 #ifdef __APPLE__
     id<MTLDevice> device = (id<MTLDevice>)mtl_device_;
+    // Clean up cached executables
+    for (auto const& [key, val] : pipeline_cache_) {
+        MPSGraphExecutable *exec = (MPSGraphExecutable*)val;
+        exec = nil;
+    }
     device = nil;
 #endif
-    std::cout << "[Lumen] Runtime shut down." << std::endl;
 }
 
-void Runtime::probe_gpu(std::vector<DeviceInfo>& devices) {
-#ifdef __APPLE__
-    id<MTLDevice> device = (id<MTLDevice>)mtl_device_;
-    if (device) {
-        std::string name = [[device name] UTF8String];
-        devices.push_back({DeviceType::GPU, name});
+void Runtime::calibrate_thresholds() {
+    // We use a medium size to test the crossover point
+    size_t test_size = 5000;
+    auto* A = alloc(test_size * sizeof(float));
+    auto* B = alloc(test_size * sizeof(float));
+    auto* C = alloc(test_size * sizeof(float));
+
+    // Fill with dummy data
+    for(size_t i=0; i<test_size; ++i) {
+        ((float*)A->data())[i] = 1.0f;
+        ((float*)B->data())[i] = 2.0f;
     }
-#endif
-}
 
-void Runtime::probe_npu(std::vector<DeviceInfo>& devices) {
-#ifdef __APPLE__
-    devices.push_back({DeviceType::NPU, "Apple Neural Engine"});
-#endif
-}
+    // Time CPU via the Registry
+    auto s1 = std::chrono::high_resolution_clock::now();
+    if (cpu_ops_.count("add")) cpu_ops_["add"]({A, B}, C);
+    auto e1 = std::chrono::high_resolution_clock::now();
+    
+    // Time GPU via the Registry (which calls run_gpu internally)
+    auto s2 = std::chrono::high_resolution_clock::now();
+    if (gpu_ops_.count("add")) gpu_ops_["add"]({A, B}, C);
+    auto e2 = std::chrono::high_resolution_clock::now();
 
-std::vector<DeviceInfo> Runtime::discover_hardware() {
-    std::vector<DeviceInfo> devices;
-    devices.push_back({DeviceType::CPU, "Host System CPU"});
-    probe_gpu(devices);
-    probe_npu(devices);
-    return devices;
+    double cpu_time = std::chrono::duration<double, std::milli>(e1 - s1).count();
+    double gpu_time = std::chrono::duration<double, std::milli>(e2 - s2).count();
+
+    // Novelty: Auto-tuning the threshold based on real-time hardware latency
+    if (gpu_time > cpu_time) {
+        // If GPU is slower at this size, we should prefer CPU for even larger tasks
+        config_.cpu_to_npu_threshold = test_size * 2;
+    } else {
+        config_.cpu_to_npu_threshold = test_size / 2;
+    }
+
+    delete A; delete B; delete C;
+}
+void Runtime::register_ops() {
+    // --- CPU Registry (Accelerate/vDSP) ---
+    cpu_ops_["add"] = [](const std::vector<Buffer*>& ins, Buffer* out) {
+        size_t n = out->size() / sizeof(float);
+        vDSP_vadd((float*)ins[0]->data(), 1, (float*)ins[1]->data(), 1, (float*)out->data(), 1, n);
+    };
+    
+    cpu_ops_["mul"] = [](const std::vector<Buffer*>& ins, Buffer* out) {
+        size_t n = out->size() / sizeof(float);
+        vDSP_vmul((float*)ins[0]->data(), 1, (float*)ins[1]->data(), 1, (float*)out->data(), 1, n);
+    };
+
+    // --- GPU Registry (MPSGraph) ---
+    gpu_ops_["add"] = [this](const std::vector<Buffer*>& ins, Buffer* out) {
+        this->run_gpu("add", ins, out); 
+    };
+    
+    gpu_ops_["mul"] = [this](const std::vector<Buffer*>& ins, Buffer* out) {
+        this->run_gpu("mul", ins, out); 
+    };
+
+    // CPU MatMul using Accelerate's BLAS
+    cpu_ops_["matmul"] = [](const std::vector<Buffer*>& ins, Buffer* out) {
+        int n = sqrt(out->size() / sizeof(float)); // Assuming square for demo
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, n, n, n, 1.0f, 
+                    (float*)ins[0]->data(), n, (float*)ins[1]->data(), n, 0.0f, (float*)out->data(), n);
+    };
+
+    // GPU MatMul using MPSGraph
+    gpu_ops_["matmul"] = [this](const std::vector<Buffer*>& ins, Buffer* out) {
+        this->run_gpu("matmul", ins, out); 
+    };
 }
 
 Buffer* Runtime::alloc(size_t size) {
 #ifdef __APPLE__
     id<MTLDevice> device = (id<MTLDevice>)mtl_device_;
-    if (!device) return nullptr;
-
-    // Allocate Unified Memory (Shared between CPU and GPU)
-    id<MTLBuffer> mtlBuffer = [device newBufferWithLength:size 
-                                               options:MTLResourceStorageModeShared];
-    
-    if (!mtlBuffer) return nullptr;
-
+    // Zero-Serialization: Shared memory accessible by CPU and GPU
+    id<MTLBuffer> mtlBuffer = [device newBufferWithLength:size options:MTLResourceStorageModeShared];
     return new Buffer(size, (void*)mtlBuffer, [mtlBuffer contents]);
-#else
-    return nullptr;
 #endif
+    return nullptr;
 }
 
-void Runtime::run_task(const std::string& name) {
-    std::cout << "[Lumen] Running task '" << name << "'..." << std::endl;
+void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
+    size_t elements = output->size() / sizeof(float);
+
+    // Orchestrator: Smart routing based on profiling data
+    if (elements < config_.cpu_to_npu_threshold) {
+        if (cpu_ops_.count(op_name)) {
+            cpu_ops_[op_name](inputs, output);
+        }
+    } else {
+        if (gpu_ops_.count(op_name)) {
+            gpu_ops_[op_name](inputs, output);
+        }
+    }
 }
-void Runtime::dispatch_compute(Buffer* buffer, const std::string& shader_source) {
+
+void Runtime::run_gpu(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
 #ifdef __APPLE__
     id<MTLDevice> device = (id<MTLDevice>)mtl_device_;
-    id<MTLComputePipelineState> pipeline = nil;
+    std::string cache_key = op_name + "_" + std::to_string(output->size());
+    MPSGraphExecutable *executable = nil;
 
-    // 1. Check Cache
-    if (pipeline_cache_.count(shader_source)) {
-        pipeline = (id<MTLComputePipelineState>)pipeline_cache_[shader_source];
+    if (pipeline_cache_.count(cache_key)) {
+        executable = (MPSGraphExecutable*)pipeline_cache_[cache_key];
     } else {
-        NSError* error = nil;
-        NSString* source = [NSString stringWithUTF8String:shader_source.c_str()];
-        id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
-        
-        if (!library) {
-            std::cerr << "Shader Error: " << [[error localizedDescription] UTF8String] << std::endl;
-            return;
-        }
+        @autoreleasepool {
+            MPSGraph *graph = [[MPSGraph alloc] init];
+            size_t total_elements = output->size() / sizeof(float);
+            
+            // Logic: If MatMul, we need 2D shapes
+            NSArray<NSNumber *> *shape;
+            if (op_name == "matmul") {
+                int dim = sqrt(total_elements);
+                shape = @[@(dim), @(dim)];
+            } else {
+                shape = @[@(total_elements)];
+            }
 
-        id<MTLFunction> function = [library newFunctionWithName:@"multiply_by_two"];
-        pipeline = [device newComputePipelineStateWithFunction:function error:&error];
-        
-        if (pipeline) {
-            pipeline_cache_[shader_source] = (void*)pipeline;
-            std::cout << "[Lumen] Shader compiled and cached." << std::endl;
+            MPSGraphTensor *aTensor = [graph placeholderWithShape:shape dataType:MPSDataTypeFloat32 name:@"A"];
+            MPSGraphTensor *bTensor = [graph placeholderWithShape:shape dataType:MPSDataTypeFloat32 name:@"B"];
+            
+            MPSGraphTensor *resTensor = nil;
+            if (op_name == "add") {
+                resTensor = [graph additionWithPrimaryTensor:aTensor secondaryTensor:bTensor name:nil];
+            } else if (op_name == "matmul") {
+                resTensor = [graph matrixMultiplicationWithPrimaryTensor:aTensor 
+                                                         secondaryTensor:bTensor name:nil];
+            }
+
+            if (resTensor) {
+                MPSGraphShapedType *type = [[MPSGraphShapedType alloc] initWithShape:shape dataType:MPSDataTypeFloat32];
+                executable = [graph compileWithDevice:[MPSGraphDevice deviceWithMTLDevice:device]
+                                                feeds:@{aTensor: type, bTensor: type}
+                                     targetTensors:@[resTensor]
+                                  targetOperations:nil
+                               compilationDescriptor:nil];
+                pipeline_cache_[cache_key] = (void*)executable;
+            }
         }
     }
 
-    // 2. Execution (this uses the 'pipeline' from either the cache or the new compilation)
-    id<MTLCommandQueue> queue = [device newCommandQueue];
-    id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    // Hot Run: Ensure the Data objects use the SAME SHAPE as the compiled executable
+    @autoreleasepool {
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        size_t total_elements = output->size() / sizeof(float);
+        NSArray<NSNumber *> *execShape = (op_name == "matmul") ? 
+            @[@( (int)sqrt(total_elements) ), @( (int)sqrt(total_elements) )] : @[@(total_elements)];
 
-    [encoder setComputePipelineState:pipeline];
-    [encoder setBuffer:(id<MTLBuffer>)buffer->device_handle() offset:0 atIndex:0];
+        MPSGraphTensorData *aData = [[MPSGraphTensorData alloc] initWithMTLBuffer:(id<MTLBuffer>)inputs[0]->device_handle() shape:execShape dataType:MPSDataTypeFloat32];
+        MPSGraphTensorData *bData = [[MPSGraphTensorData alloc] initWithMTLBuffer:(id<MTLBuffer>)inputs[1]->device_handle() shape:execShape dataType:MPSDataTypeFloat32];
+        MPSGraphTensorData *outData = [[MPSGraphTensorData alloc] initWithMTLBuffer:(id<MTLBuffer>)output->device_handle() shape:execShape dataType:MPSDataTypeFloat32];
 
-    uint32_t numElements = buffer->size() / sizeof(float);
-    MTLSize gridSize = MTLSizeMake(numElements, 1, 1);
-    NSUInteger threadGroupSizeLimit = [pipeline maxTotalThreadsPerThreadgroup];
-    MTLSize threadGroupSize = MTLSizeMake(std::min((NSUInteger)numElements, threadGroupSizeLimit), 1, 1);
-
-    [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
-    [encoder endEncoding];
-
-    [commandBuffer commit];
-    [commandBuffer waitUntilCompleted];
+        [executable runWithMTLCommandQueue:queue inputsArray:@[aData, bData] resultsArray:@[outData] executionDescriptor:nil];
+    }
 #endif
 }
 
-void Runtime::smart_dispatch(Buffer* buffer, const std::string& shader_source) {
-    size_t element_count = buffer->size() / sizeof(float);
-    
-    // Heuristic: If work is too small, don't wake up the GPU.
-    // This saves energy and avoids launch latency.
-    if (element_count < 5000) {
-        std::cout << "[Orchestrator] Task small (" << element_count 
-                  << " units). Executing on CPU for efficiency." << std::endl;
-        
-        float* data = (float*)buffer->data();
-        for(size_t i = 0; i < element_count; ++i) {
-            data[i] *= 2.0f; // Manual CPU fallback
-        }
-    } else {
-        std::cout << "[Orchestrator] Task large (" << element_count 
-                  << " units). Offloading to GPU..." << std::endl;
-        dispatch_compute(buffer, shader_source);
-    }
-}
-
-void Runtime::dispatch_npu(Buffer* buffer, float multiplier) {
-    std::cout << "[Lumen] Dispatching to Neural/Vector Engine..." << std::endl;
-#ifdef __APPLE__
-    float* data = (float*)buffer->data();
-    size_t n = buffer->size() / sizeof(float);
-    
-    // vDSP_vsmul: Vector-Scalar Multiplication
-    // This uses the AMX/NPU units on Apple Silicon to multiply 
-    // an entire array by a value in one highly optimized pass.
-    vDSP_vsmul(data, 1, &multiplier, data, 1, n);
-#endif
-}
-
-void Runtime::dispatch_cpu(Buffer* buffer) {
-    float* data = (float*)buffer->data();
-    size_t n = buffer->size() / sizeof(float);
-    for(size_t i = 0; i < n; ++i) {
-        data[i] *= 2.0f;
-    }
-}
-
-void Runtime::run_task_smart(Buffer* buffer, const std::string& shader_source) {
-    size_t elements = buffer->size() / sizeof(float);
-
-    if (elements < 1000) {
-        std::cout << ">>> [Orchestrator] Task: " << elements << " units. Route: CPU (Latency Mode)" << std::endl;
-        dispatch_cpu(buffer);
-    } 
-    else if (elements < 100000) {
-        std::cout << ">>> [Orchestrator] Task: " << elements << " units. Route: NPU/AMX (Power Mode)" << std::endl;
-        dispatch_npu(buffer, 2.0f);
-    } 
-    else {
-        std::cout << ">>> [Orchestrator] Task: " << elements << " units. Route: GPU (Throughput Mode)" << std::endl;
-        dispatch_compute(buffer, shader_source);
-    }
-}
-
-
-void Runtime::autotune() {
-    std::cout << "[Lumen] Auto-tuning for your " << "Hardware..." << std::endl;
-    
-    // 1. Measure CPU Baseline
-    auto s1 = std::chrono::high_resolution_clock::now();
-    for(int i=0; i<1000; ++i) { /* empty loop */ }
-    auto e1 = std::chrono::high_resolution_clock::now();
-    double cpu_time = std::chrono::duration<double, std::nano>(e1-s1).count();
-
-    // 2. Measure GPU Dispatch Overhead (Cold Start vs Cached)
-    // We run a "null" dispatch to see how long the command queue takes
-    auto s2 = std::chrono::high_resolution_clock::now();
-    // (Simulate or run a tiny empty shader here)
-    auto e2 = std::chrono::high_resolution_clock::now();
-    double gpu_overhead = std::chrono::duration<double, std::nano>(e2-s2).count();
-
-    // 3. Set thresholds based on measured latency
-    // If GPU overhead is high, we push the threshold higher
-    if (gpu_overhead > 100000) { // 100us
-        config_.npu_to_gpu_threshold = 150000;
-    }
-    
-    std::cout << "[Lumen] Auto-tune complete. GPU Threshold: " 
-              << config_.npu_to_gpu_threshold << " units." << std::endl;
-}
 } // namespace lumen

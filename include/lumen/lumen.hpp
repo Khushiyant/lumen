@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstddef>
 #include <map>
+#include <functional> // Required for std::function
 
 namespace lumen {
 
@@ -32,33 +33,34 @@ struct TuningConfig {
     size_t npu_to_gpu_threshold = 50000;
 };
 
+// Define the worker type for the registry
+using OpWorker = std::function<void(const std::vector<Buffer*>&, Buffer*)>;
+
 class Runtime {
 public:
     Runtime();
     ~Runtime();
     
-    std::vector<DeviceInfo> discover_hardware();
     Buffer* alloc(size_t size);
 
-    void run_task(const std::string& name);
-    void smart_dispatch(Buffer* buffer, const std::string& shader_source);
-    
-    // Supporting backends
-    void dispatch_cpu(Buffer* buffer);
-    void dispatch_compute(Buffer* buffer, const std::string& shader_source);
-    void dispatch_npu(Buffer* buffer, float multiplier);
-    void run_task_smart(Buffer* buffer, const std::string& shader_source);
-
-    void autotune();
+    void execute(const std::string& op_name, 
+                 const std::vector<Buffer*>& inputs, 
+                 Buffer* output);
+    void calibrate_thresholds();
 
 private:
-    void probe_gpu(std::vector<DeviceInfo>& devices);
-    void probe_npu(std::vector<DeviceInfo>& devices);
-    void* mtl_device_; 
+    void run_cpu(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output);
+    void run_gpu(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output);
+
+    void* mtl_device_;
+    std::map<std::string, void*> pipeline_cache_;
     TuningConfig config_;
 
-
-    std::map<std::string, void*> pipeline_cache_;
+    // Registry maps for "Plug-and-Play" operations
+    std::map<std::string, OpWorker> cpu_ops_;
+    std::map<std::string, OpWorker> gpu_ops_;
+    
+    void register_ops();
 };
 
 } // namespace lumen

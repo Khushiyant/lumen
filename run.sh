@@ -27,3 +27,6 @@ ctest --output-on-failure
 # Run the example
 echo -e "\n--- Running Example ---"
 ./bin/lumen_test
+
+echo -e "\n Benchmarking Lumen..."
+./bin/lumen_bench
