@@ -1,12 +1,14 @@
 #include <lumen/lumen.hpp>
 #include <cassert>
 #include <iostream>
+#include <cmath>
 
 void test_ops() {
     lumen::Runtime rt;
-    auto* A = rt.alloc(sizeof(float));
-    auto* B = rt.alloc(sizeof(float));
-    auto* C = rt.alloc(sizeof(float));
+    // Now passing explicit shapes
+    auto* A = rt.alloc({1});
+    auto* B = rt.alloc({1});
+    auto* C = rt.alloc({1});
 
     *(float*)A->data() = 20.0f;
     *(float*)B->data() = 4.0f;
@@ -18,33 +20,29 @@ void test_ops() {
     assert(*(float*)C->data() == 80.0f);
 
     std::cout << "Unit Tests Passed: Operations Verified." << std::endl;
-    delete A; delete B; delete C;
+    delete A; delete B; delete C; // Triggering RAII cleanup
 }
 
 void test_matrix_multiplication() {
     lumen::Runtime rt;
     
-    // Create 4x4 matrices (16 elements)
     size_t dim = 4;
-    size_t n = dim * dim;
-    auto* A = rt.alloc(n * sizeof(float));
-    auto* B = rt.alloc(n * sizeof(float));
-    auto* C = rt.alloc(n * sizeof(float));
+    auto* A = rt.alloc({dim, dim});
+    auto* B = rt.alloc({dim, dim});
+    auto* C = rt.alloc({dim, dim});
 
     float* a_ptr = static_cast<float*>(A->data());
     float* b_ptr = static_cast<float*>(B->data());
 
-    // Identity Matrix A * Constant Matrix B
-    for(size_t i = 0; i < n; ++i) {
-        a_ptr[i] = (i % (dim + 1) == 0) ? 1.0f : 0.0f; // Identity
-        b_ptr[i] = 5.0f;                               // All 5s
+    for(size_t i = 0; i < dim*dim; ++i) {
+        a_ptr[i] = (i % (dim + 1) == 0) ? 1.0f : 0.0f; 
+        b_ptr[i] = 5.0f;                               
     }
 
     rt.execute("matmul", {A, B}, C);
 
     float* c_ptr = static_cast<float*>(C->data());
-    // Result should be all 5s because Identity * B = B
-    for(size_t i = 0; i < n; ++i) {
+    for(size_t i = 0; i < dim*dim; ++i) {
         assert(std::abs(c_ptr[i] - 5.0f) < 1e-5);
     }
 

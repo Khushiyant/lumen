@@ -1,61 +1,65 @@
 #include <lumen/lumen.hpp>
 #include <iostream>
 #include <vector>
+#include <iomanip>
+
+void run_on_backend(lumen::Runtime& rt, const std::string& backend_name) {
+    std::cout << "\n--- Running on Backend: " << backend_name << " ---" << std::endl;
+    
+    // 1. Explicitly Switch Backend
+    rt.set_backend(backend_name);
+    
+    if (rt.current_backend() != backend_name) {
+        std::cout << "Skipping: Backend not available." << std::endl;
+        return;
+    }
+
+    // 2. Allocate Buffers (Allocated on the ACTIVE backend)
+    // Note: In this Phase 1 implementation, buffers cannot yet be shared 
+    // between backends. We must allocate new ones for the CPU.
+    size_t dim = 1024;
+    auto* A = rt.alloc({dim, dim});
+    auto* B = rt.alloc({dim, dim});
+    auto* C = rt.alloc({dim, dim});
+
+    // 3. Initialize Data
+    float* a_ptr = (float*)A->data();
+    float* b_ptr = (float*)B->data();
+    
+    size_t n = dim * dim;
+    for(size_t i = 0; i < n; i++) {
+        a_ptr[i] = 1.0f;
+        b_ptr[i] = 2.0f;
+    }
+
+    // 4. Record & Execute
+    // Metal will fuse these; CPU will execute them sequentially in sync()
+    std::cout << "[" << backend_name << "] Recording MatMul..." << std::endl;
+    rt.record("matmul", {A, B}, C);
+
+    std::cout << "[" << backend_name << "] Syncing..." << std::endl;
+    rt.sync();
+
+    // 5. Verify Result
+    float* result = (float*)C->data();
+    // 1.0 * 2.0 * 1024 elements = 2048.0
+    std::cout << "[" << backend_name << "] Result[0]: " << result[0] 
+              << " (Expected: 2048.0)" << std::endl;
+
+    // Cleanup
+    delete A; delete B; delete C;
+}
 
 int main() {
     lumen::Runtime rt;
     
-    // Define size (e.g., 1024x1024 matrix)
-    size_t dim = 1024;
-    size_t n = dim * dim;
-    size_t bytes = n * sizeof(float);
+    // 1. Run on Metal (Default on macOS)
+    run_on_backend(rt, "metal");
 
-    std::cout << "[Example] Allocating buffers for Kernel Fusion..." << std::endl;
+    // 2. Run on CPU (Universal Fallback)
+    run_on_backend(rt, "cpu");
 
-    // 1. Allocate Buffers
-    auto* A = rt.alloc(bytes);
-    auto* B = rt.alloc(bytes);
-    auto* C = rt.alloc(bytes); // Intermediate (Output of MatMul, Input to Add)
-    auto* D = rt.alloc(bytes); // Bias
-    auto* E = rt.alloc(bytes); // Final Result
-
-    // 2. Initialize Data (Fill with dummy values)
-    float* a_ptr = (float*)A->data();
-    float* b_ptr = (float*)B->data();
-    float* d_ptr = (float*)D->data();
-    
-    for(size_t i = 0; i < n; i++) {
-        a_ptr[i] = 1.0f; // Identity-like
-        b_ptr[i] = 2.0f;
-        d_ptr[i] = 5.0f; // Add 5 to everything
-    }
-
-    // 3. Record Operations (Lazy Execution)
-    std::cout << "[Example] Recording operation chain..." << std::endl;
-    
-    // Op 1: C = A * B (Matrix Multiply)
-    rt.record("matmul", {A, B}, C);
-    
-    // Op 2: E = C + D (Element-wise Add)
-    // Note: 'C' is consumed here immediately without going back to CPU RAM
-    rt.record("add", {C, D}, E);
-
-    // 4. Sync (Trigger Fusion)
-    std::cout << "[Example] Syncing (Compiling & Running Fused Kernel)..." << std::endl;
-    rt.sync();
-
-    // 5. Verify Results
-    float* result = (float*)E->data();
-    std::cout << "Workflow Complete." << std::endl;
-    std::cout << "Result index 0: " << result[0] << " (Expected approx 2048*2 + 5 = 4101.0)" << std::endl; 
-    // Note: For a 1024x1024 matrix multiplication of all 1s and 2s, 
-    // the dot product is row*col. row is 1s, col is 2s. len is 1024.
-    // So 1*2 * 1024 = 2048. Then we add 5. So 2053.
-    // Wait, simple logic: Row(1,1...) dot Col(2,2...) = sum(1*2 for 1024) = 2048. 
-    // + Bias(5) = 2053.
-    
-    // Clean up
-    delete A; delete B; delete C; delete D; delete E;
+    run_on_backend(rt, "cuda");
 
     return 0;
 }

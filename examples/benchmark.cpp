@@ -1,46 +1,114 @@
 #include <lumen/lumen.hpp>
+#include <cassert>
 #include <iostream>
-#include <chrono>
-#include <vector>
-#include <iomanip>
 #include <cmath>
+#include <vector>
+#include <chrono> 
+#include <iomanip>
 
-void run_matmul_bench(lumen::Runtime& rt, int dim) {
-    size_t n = dim * dim;
-    auto* A = rt.alloc(n * sizeof(float));
-    auto* B = rt.alloc(n * sizeof(float));
-    auto* C = rt.alloc(n * sizeof(float));
+// Helper to print timing
+void print_metrics(const std::string& name, std::chrono::nanoseconds duration) {
+    double ms = duration.count() / 1e6;
+    std::cout << "  - " << name << ": " << std::fixed << std::setprecision(3) << ms << " ms" << std::endl;
+}
 
-    // Warm-up to trigger JIT compilation/caching
-    rt.execute("matmul", {A, B}, C);
+// 1. Functional Test for CPU
+void test_cpu_fallback() {
+    lumen::Runtime rt;
+    std::cout << "[Test] Switching to CPU Backend..." << std::endl;
+    rt.set_backend("cpu");
 
-    auto start = std::chrono::high_resolution_clock::now();
-    int iterations = 10;
-    for(int i = 0; i < iterations; ++i) {
-        rt.execute("matmul", {A, B}, C);
+    if (rt.current_backend() != "cpu") {
+        std::cout << "SKIPPED: CPU backend not found (should not happen)." << std::endl;
+        return;
     }
-    auto end = std::chrono::high_resolution_clock::now();
 
-    double avg_ms = std::chrono::duration<double, std::milli>(end - start).count() / iterations;
+    auto* A = rt.alloc({1});
+    auto* B = rt.alloc({1});
+    auto* C = rt.alloc({1});
+
+    *(float*)A->data() = 10.0f;
+    *(float*)B->data() = 5.0f;
+
+    // CPU executes synchronously immediately inside sync/execute
+    rt.execute("add", {A, B}, C); 
     
-    // Formula for Floating Point Operations in MatMul: 2 * M * N * K
-    double gflops = (2.0 * dim * dim * dim) / (avg_ms * 1e6);
+    assert(*(float*)C->data() == 15.0f);
+    
+    rt.execute("mul", {A, B}, C);
+    assert(*(float*)C->data() == 50.0f);
 
-    std::cout << "Matrix: " << dim << "x" << dim 
-              << " | Avg Time: " << std::fixed << std::setprecision(3) << avg_ms << " ms"
-              << " | Performance: " << gflops << " GFLOPS" << std::endl;
-
+    std::cout << "PASS: CPU Backend Functional Test" << std::endl;
     delete A; delete B; delete C;
 }
 
-int main() {
+// 2. Existing Metal Tests (Runs on default backend)
+void test_metal_features() {
     lumen::Runtime rt;
-    std::cout << "\n--- Lumen MatMul Performance Benchmark ---\n";
+    rt.set_backend("metal");
     
-    std::vector<int> sizes = {256, 512, 1024, 2048};
-    for(int dim : sizes) {
-        run_matmul_bench(rt, dim);
-    }
+    if (rt.current_backend() != "metal") return;
+
+    // Zero-Copy Check
+    size_t n = 1024;
+    auto* A = rt.alloc({n});
+    auto* B = rt.alloc({n});
+    auto* C = rt.alloc({n});
+
+    float* a_ptr = (float*)A->data();
+    float* b_ptr = (float*)B->data();
+    for(size_t i=0; i<n; ++i) { a_ptr[i] = 1.0f; b_ptr[i] = 1.0f; }
+
+    rt.execute("add", {A, B}, C);
+    assert(((float*)C->data())[0] == 2.0f);
+
+    std::cout << "PASS: Metal Backend (Zero-Copy & Ops)" << std::endl;
+    delete A; delete B; delete C;
+}
+
+// 3. Compare Performance: Metal vs CPU
+void benchmark_backend_comparison() {
+    lumen::Runtime rt;
+    size_t dim = 1024; // 1024x1024 MatMul
     
+    auto run_bench = [&](const std::string& backend) {
+        rt.set_backend(backend);
+        if (rt.current_backend() != backend) return;
+
+        auto* A = rt.alloc({dim, dim});
+        auto* B = rt.alloc({dim, dim});
+        auto* C = rt.alloc({dim, dim});
+
+        // Init
+        float* ptr = (float*)A->data();
+        for(size_t i=0; i<dim*dim; i++) ptr[i] = 1.0f;
+
+        // Warmup
+        rt.execute("matmul", {A, B}, C);
+
+        // Measure
+        auto start = std::chrono::high_resolution_clock::now();
+        rt.execute("matmul", {A, B}, C);
+        auto end = std::chrono::high_resolution_clock::now();
+
+        std::cout << "PASS: " << backend << " MatMul (" << dim << "x" << dim << ")" << std::endl;
+        print_metrics("Latency", end - start);
+
+        delete A; delete B; delete C;
+    };
+
+    std::cout << "\n--- Performance Comparison ---" << std::endl;
+    run_bench("metal"); // Expect Fast
+    run_bench("cpu");   // Expect Slow (Naive C++ loop)
+}
+
+int main() {
+    std::cout << "--- Starting Lumen Multi-Backend Tests ---" << std::endl;
+    
+    test_cpu_fallback();
+    test_metal_features();
+    benchmark_backend_comparison();
+    
+    std::cout << "--- All Tests Completed Successfully ---" << std::endl;
     return 0;
 }

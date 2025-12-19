@@ -1,33 +1,71 @@
 #include "lumen/lumen.hpp"
 #include <iostream>
-
+#include <numeric>
+#ifdef LUMEN_USE_CUDA
+    std::unique_ptr<Backend> create_cuda_backend();
+#endif
 namespace lumen {
-    // Forward declare the factory defined in metal_backend.mm
+    // Forward declarations of factories
     std::unique_ptr<Backend> create_metal_backend();
+    std::unique_ptr<Backend> create_cpu_backend();
 
-    // Buffer Implementation
-    Buffer::Buffer(size_t size, void* device_ptr, void* host_ptr) 
-        : size_(size), device_ptr_(device_ptr), host_ptr_(host_ptr) {}
+    Buffer::Buffer(const std::vector<size_t>& shape, void* device_ptr, void* host_ptr, Backend* creator) 
+        : shape_(shape), device_ptr_(device_ptr), host_ptr_(host_ptr), creator_(creator) {}
     
     Buffer::~Buffer() { 
-        // In a real system, we would call backend->free(this) here.
-        // For now, we rely on the backend/OS cleaning up.
+        if (creator_ && device_ptr_) {
+            creator_->free_buffer(device_ptr_);
+        }
     }
 
-    // Runtime Implementation
+    size_t Buffer::size_bytes() const {
+        size_t total = std::accumulate(shape_.begin(), shape_.end(), 1ULL, std::multiplies<size_t>());
+        return total * sizeof(float);
+    }
+
     Runtime::Runtime() {
-#ifdef __APPLE__
-        gpu_backend_ = create_metal_backend();
-        std::cout << "[Lumen] Core Initialized with Metal Backend" << std::endl;
-#endif
+        // 1. CPU (Always available)
+        backends_["cpu"] = create_cpu_backend();
+
+        // 2. Metal (Apple only)
+        #ifdef LUMEN_USE_METAL
+            backends_["metal"] = create_metal_backend();
+        #endif
+
+        // 3. CUDA (NVIDIA only) - NEW!
+        #ifdef LUMEN_USE_CUDA
+            backends_["cuda"] = create_cuda_backend();
+        #endif
+
+        // 4. Default Selection Priority: CUDA -> Metal -> CPU
+        if (backends_.count("cuda")) {
+            set_backend("cuda");
+        } else if (backends_.count("metal")) {
+            set_backend("metal");
+        } else {
+            set_backend("cpu");
+        }
     }
 
     Runtime::~Runtime() = default;
 
-    Buffer* Runtime::alloc(size_t size) {
-        // CLEAN: We just ask the backend for a Buffer. 
-        // No Objective-C code here!
-        return gpu_backend_->create_buffer(size);
+    void Runtime::set_backend(const std::string& name) {
+        if (backends_.find(name) != backends_.end()) {
+            active_backend_ = backends_[name].get();
+            active_backend_name_ = name;
+            std::cout << "[Lumen] Switched to backend: " << name << std::endl;
+        } else {
+            std::cerr << "[Lumen] Warning: Backend '" << name << "' not found!" << std::endl;
+        }
+    }
+
+    std::string Runtime::current_backend() const {
+        return active_backend_name_;
+    }
+
+    Buffer* Runtime::alloc(const std::vector<size_t>& shape) {
+        // Allocate on the *currently active* backend
+        return active_backend_->create_buffer(shape);
     }
 
     void Runtime::record(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
@@ -35,12 +73,12 @@ namespace lumen {
     }
 
     void Runtime::sync() {
-        if (gpu_backend_) gpu_backend_->sync(op_queue_);
+        if (active_backend_) active_backend_->sync(op_queue_);
         op_queue_.clear();
     }
 
     void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
-        if (gpu_backend_) gpu_backend_->execute(op_name, inputs, output);
+        if (active_backend_) active_backend_->execute(op_name, inputs, output);
     }
 
 } // namespace lumen

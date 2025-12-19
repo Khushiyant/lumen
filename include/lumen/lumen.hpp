@@ -8,6 +8,7 @@
 namespace lumen {
 
 class Buffer;
+class Backend;
 
 struct QueuedOp {
     std::string op_name;
@@ -19,23 +20,26 @@ struct QueuedOp {
 class Backend {
 public:
     virtual ~Backend() = default;
-    // CHANGED: Returns Buffer* directly so Core doesn't need to know about Handles
-    virtual Buffer* create_buffer(size_t size) = 0;
+    virtual Buffer* create_buffer(const std::vector<size_t>& shape) = 0;
+    virtual void free_buffer(void* device_ptr) = 0;
     virtual void execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) = 0;
     virtual void sync(std::vector<QueuedOp>& queue) = 0;
 };
 
 class Buffer {
 public:
-    Buffer(size_t size, void* device_ptr, void* host_ptr);
-    ~Buffer(); // Defined in runtime.cpp
+    Buffer(const std::vector<size_t>& shape, void* device_ptr, void* host_ptr, Backend* creator);
+    ~Buffer();
+    
     void* data() { return host_ptr_; }
-    size_t size() const { return size_; }
+    const std::vector<size_t>& shape() const { return shape_; }
+    size_t size_bytes() const;
     void* device_handle() const { return device_ptr_; }
 private:
-    size_t size_;
+    std::vector<size_t> shape_;
     void* device_ptr_; 
     void* host_ptr_;   
+    Backend* creator_; 
 };
 
 class Runtime {
@@ -43,13 +47,20 @@ public:
     Runtime();
     ~Runtime();
     
-    Buffer* alloc(size_t size);
+    // Core API
+    Buffer* alloc(const std::vector<size_t>& shape);
     void record(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output);
     void sync(); 
     void execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output);
 
+    // New: Backend Management API
+    void set_backend(const std::string& backend_name);
+    std::string current_backend() const;
+
 private:
-    std::unique_ptr<Backend> gpu_backend_;
+    std::map<std::string, std::unique_ptr<Backend>> backends_;
+    Backend* active_backend_; // Pointer to the currently selected backend
+    std::string active_backend_name_;
     std::vector<QueuedOp> op_queue_;
 };
 
