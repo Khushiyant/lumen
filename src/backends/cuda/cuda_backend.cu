@@ -2,11 +2,12 @@
 #include <iostream>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
-#include <stdexcept> // Required for runtime_error
+#include <stdexcept>
+#include <string>
 
 namespace lumen {
 
-// Simple CUDA kernels
+// Simple CUDA kernels for element-wise ops
 __global__ void add_kernel(const float* a, const float* b, float* c, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) c[i] = a[i] + b[i];
@@ -20,30 +21,31 @@ __global__ void mul_kernel(const float* a, const float* b, float* c, int n) {
 class CUDABackend : public Backend {
 public:
     CUDABackend() {
-        // 1. Check for Device
         int deviceCount = 0;
         cudaError_t err = cudaGetDeviceCount(&deviceCount);
-        if (err != cudaSuccess || deviceCount == 0) {
-            throw std::runtime_error("No CUDA-capable device detected.");
-        }
-
-        // 2. Set Device
-        err = cudaSetDevice(0);
+        
         if (err != cudaSuccess) {
-            throw std::runtime_error("Failed to set CUDA device 0.");
+            throw std::runtime_error("CUDA Driver Error: " + std::string(cudaGetErrorString(err)));
+        }
+        
+        if (deviceCount == 0) {
+            throw std::runtime_error("No CUDA-capable devices found on this system.");
         }
 
-        // 3. Initialize cuBLAS
+        // Set to first available device
+        cudaSetDevice(0);
+
+        // Initialize cuBLAS for Matrix Multiplications
         cublasStatus_t stat = cublasCreate(&cublas_handle_);
         if (stat != CUBLAS_STATUS_SUCCESS) {
             throw std::runtime_error("Failed to initialize cuBLAS.");
         }
 
-        std::cout << "[Lumen] CUDA Backend Initialized (Unified Memory)" << std::endl;
+        std::cout << "[Lumen] CUDA Backend Initialized (Unified Memory Mode)" << std::endl;
     }
 
     ~CUDABackend() {
-        cublasDestroy(cublas_handle_);
+        if (cublas_handle_) cublasDestroy(cublas_handle_);
     }
 
     Buffer* create_buffer(const std::vector<size_t>& shape) override {
@@ -52,7 +54,7 @@ public:
         size_t size = total_elements * sizeof(float);
 
         void* ptr = nullptr;
-        // FIX: Use Managed Memory so CPU and GPU can both access it (Zero-Copy)
+        // ZERO-COPY: Allocate memory that is visible to both CPU and GPU
         cudaError_t err = cudaMallocManaged(&ptr, size);
         
         if (err != cudaSuccess) {
@@ -60,7 +62,6 @@ public:
             return nullptr;
         }
 
-        // In Unified Memory, device_ptr == host_ptr
         return new Buffer(shape, ptr, ptr, this);
     }
 
@@ -77,11 +78,6 @@ public:
         for (const auto& op : queue) {
             float* d_out = static_cast<float*>(op.output->device_handle());
             size_t n = op.output->size_bytes() / sizeof(float);
-
-            // Synchronize to ensure CPU writes are visible to GPU
-            // (Strictly speaking, cudaMallocManaged handles this on kernel launch, 
-            // but explicit sync helps debugging)
-            // cudaDeviceSynchronize(); 
 
             if (op.op_name == "add" || op.op_name == "mul") {
                 float* d_a = static_cast<float*>(op.inputs[0]->device_handle());
@@ -100,8 +96,6 @@ public:
                 float* d_a = static_cast<float*>(op.inputs[0]->device_handle());
                 float* d_b = static_cast<float*>(op.inputs[1]->device_handle());
                 
-                // cuBLAS expects column-major. We use C = B^T * A^T trick for row-major.
-                // Or standard sgemm if we treat data as row-major and swap dimensions.
                 int M = (int)op.inputs[0]->shape()[0];
                 int K = (int)op.inputs[0]->shape()[1];
                 int N = (int)op.inputs[1]->shape()[1];
@@ -109,6 +103,7 @@ public:
                 const float alpha = 1.0f;
                 const float beta = 0.0f;
 
+                // cuBLAS standard SGEMM
                 cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N,
                             N, M, K,
                             &alpha,
@@ -118,12 +113,12 @@ public:
                             d_out, N);
             }
         }
-        // Essential: Wait for GPU to finish so CPU can read results immediately
+        // Ensure GPU is finished before returning control to CPU (Zero-Copy Sync)
         cudaDeviceSynchronize();
     }
 
 private:
-    cublasHandle_t cublas_handle_;
+    cublasHandle_t cublas_handle_ = nullptr;
 };
 
 std::unique_ptr<Backend> create_cuda_backend() {
