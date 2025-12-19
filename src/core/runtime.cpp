@@ -1,6 +1,7 @@
 #include "lumen/lumen.hpp"
 #include <iostream>
 #include <numeric>
+#include <cstring>
 
 namespace lumen {
     // Forward declarations
