@@ -1,0 +1,42 @@
+# --- Build Artifacts ---
+build/
+bin/
+lib/
+out/
+*.o
+*.obj
+*.dylib
+*.so
+*.dll
+*.a
+*.lib
+
+# --- macOS Specific ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# --- IDE Specific ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.user
+*.sublime-project
+*.sublime-workspace
+
+# --- CMake Generated ---
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
