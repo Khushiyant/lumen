@@ -66,22 +66,21 @@ namespace lumen {
         return active_backend_->create_buffer(shape);
     }
 
-    // --- FIX: Full Implementation of Execute using Router ---
     void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
-        // 1. Ask Router for the best backend
-        Backend* best_backend = router_->select_backend(op_name, output->shape(), backends_);
+    Backend* best_backend = router_->select_backend(op_name, output->shape(), backends_);
 
-        // 2. Check if we are switching backends (for debug/demo)
-        if (best_backend != active_backend_) {
-            // In a real system, you might want to log this verbose switch
-            // std::cout << "[Router] Switching to " << (best_backend == backends_["cpu"].get() ? "CPU" : "GPU") << std::endl;
-            active_backend_ = best_backend;
-            active_backend_name_ = (best_backend == backends_["cpu"].get() ? "cpu" : "cuda");
+    if (best_backend != active_backend_) {
+        active_backend_ = best_backend;
+        // Dynamically find the name of the selected backend
+        for (auto const& [name, ptr] : backends_) {
+            if (ptr.get() == best_backend) {
+                active_backend_name_ = name;
+                break;
+            }
         }
-
-        // 3. Execute
-        // Since we use Unified Memory (cudaMallocManaged), pointers work on both devices
-        active_backend_->execute(op_name, inputs, output);
     }
+
+    active_backend_->execute(op_name, inputs, output);
+}
 
 } // namespace lumen

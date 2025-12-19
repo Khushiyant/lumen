@@ -11,9 +11,13 @@ namespace lumen {
 class MetalBackend : public Backend {
 public:
     MetalBackend() {
-        device_ = MTLCreateSystemDefaultDevice();
-        command_queue_ = [device_ newCommandQueue];
+    device_ = MTLCreateSystemDefaultDevice();
+    if (!device_) {
+        std::cerr << "[Lumen] Metal Error: No Metal-capable GPU detected." << std::endl;
+        return;
     }
+    command_queue_ = [device_ newCommandQueue];
+}
 
     Buffer* create_buffer(const std::vector<size_t>& shape) override {
         size_t total_elements = 1;
