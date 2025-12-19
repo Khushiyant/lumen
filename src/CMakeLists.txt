@@ -1,42 +1,59 @@
-# lumen/src/CMakeLists.txt
-
-# 1. Base Sources (Core + CPU)
+# Define sources
 set(LUMEN_SOURCES 
     core/runtime.cpp
+    core/router.cpp  # Added router.cpp here
     backends/cpu/cpu_backend.cpp
 )
 
-# 2. CUDA Support
+# --- CUDA SUPPORT (NVIDIA GPU) ---
 include(CheckLanguage)
 check_language(CUDA)
 
 if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
-    message(STATUS "Lumen: CUDA detected. Enabling CUDA backend.")
+    find_package(CUDAToolkit REQUIRED)
+
+    message(STATUS "[Lumen] CUDA Detected. Enabling Backend.")
     list(APPEND LUMEN_SOURCES backends/cuda/cuda_backend.cu)
-    add_definitions(-DLUMEN_USE_CUDA)
+    
+    add_compile_definitions(LUMEN_USE_CUDA)
+    
+    # FIX: Force Architecture 75 (RTX 20xx/30xx/40xx compatible)
+    # This prevents the "compute_120" error
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES 75)
+    endif()
 else()
-    message(STATUS "Lumen: CUDA NOT detected. Skipping.")
+    message(STATUS "[Lumen] CUDA NOT detected.")
 endif()
 
-# 3. Metal Support (Apple)
+# --- METAL SUPPORT (Apple GPU) ---
 if(APPLE)
     list(APPEND LUMEN_SOURCES backends/gpu/metal_backend.mm)
     set_source_files_properties(backends/gpu/metal_backend.mm PROPERTIES COMPILE_FLAGS "-x objective-c++ -fobjc-arc")
-    add_definitions(-DLUMEN_USE_METAL)
 endif()
 
-# 4. Create Library
+# Create Library
 add_library(lumen SHARED ${LUMEN_SOURCES})
-
 target_include_directories(lumen PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
-# 5. Link Libraries
-if(APPLE)
-    target_link_libraries(lumen PRIVATE "-framework Metal" "-framework Foundation" "-framework Accelerate" "-framework MetalPerformanceShaders" "-framework MetalPerformanceShadersGraph")
+# --- LINKING ---
+if(CMAKE_CUDA_COMPILER)
+    target_link_libraries(lumen PRIVATE CUDA::cudart CUDA::cublas)
 endif()
 
-if(CMAKE_CUDA_COMPILER)
-    # Link CUDA Runtime and cuBLAS
-    target_link_libraries(lumen PRIVATE CUDA::cudart CUDA::cublas)
+if(APPLE)
+    target_compile_definitions(lumen PRIVATE ACCELERATE_NEW_LAPACK ACCELERATE_LAPACK_ILP64 LUMEN_USE_METAL)
+    target_link_libraries(lumen PRIVATE "-framework Metal" "-framework Foundation" "-framework Accelerate" "-framework MetalPerformanceShaders" "-framework MetalPerformanceShadersGraph")
+else()
+    # Linux CPU Fallback
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(OpenBLAS openblas)
+    endif()
+    if(OpenBLAS_FOUND)
+        target_link_libraries(lumen PRIVATE ${OpenBLAS_LIBRARIES})
+        target_include_directories(lumen PRIVATE ${OpenBLAS_INCLUDE_DIRS})
+        target_compile_definitions(lumen PRIVATE LUMEN_USE_OPENBLAS)
+    endif()
 endif()

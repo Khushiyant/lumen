@@ -2,10 +2,11 @@
 #include <iostream>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <stdexcept> // Required for runtime_error
 
 namespace lumen {
 
-// CUDA Kernels for Element-wise operations
+// Simple CUDA kernels
 __global__ void add_kernel(const float* a, const float* b, float* c, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) c[i] = a[i] + b[i];
@@ -19,12 +20,26 @@ __global__ void mul_kernel(const float* a, const float* b, float* c, int n) {
 class CUDABackend : public Backend {
 public:
     CUDABackend() {
-        cudaError_t err = cudaSetDevice(0);
-        if (err != cudaSuccess) {
-            std::cerr << "[Lumen] Error: No CUDA device found!" << std::endl;
+        // 1. Check for Device
+        int deviceCount = 0;
+        cudaError_t err = cudaGetDeviceCount(&deviceCount);
+        if (err != cudaSuccess || deviceCount == 0) {
+            throw std::runtime_error("No CUDA-capable device detected.");
         }
-        cublasCreate(&cublas_handle_);
-        std::cout << "[Lumen] CUDA Backend Initialized" << std::endl;
+
+        // 2. Set Device
+        err = cudaSetDevice(0);
+        if (err != cudaSuccess) {
+            throw std::runtime_error("Failed to set CUDA device 0.");
+        }
+
+        // 3. Initialize cuBLAS
+        cublasStatus_t stat = cublasCreate(&cublas_handle_);
+        if (stat != CUBLAS_STATUS_SUCCESS) {
+            throw std::runtime_error("Failed to initialize cuBLAS.");
+        }
+
+        std::cout << "[Lumen] CUDA Backend Initialized (Unified Memory)" << std::endl;
     }
 
     ~CUDABackend() {
@@ -36,12 +51,17 @@ public:
         for (auto d : shape) total_elements *= d;
         size_t size = total_elements * sizeof(float);
 
-        void* d_ptr = nullptr;
-        cudaMalloc(&d_ptr, size);
+        void* ptr = nullptr;
+        // FIX: Use Managed Memory so CPU and GPU can both access it (Zero-Copy)
+        cudaError_t err = cudaMallocManaged(&ptr, size);
         
-        // Host pointer is nullptr because CUDA memory is discrete (not unified like Metal)
-        // We will add migration logic in Phase 2.
-        return new Buffer(shape, d_ptr, nullptr, this);
+        if (err != cudaSuccess) {
+            std::cerr << "[Lumen] CUDA Alloc Error: " << cudaGetErrorString(err) << std::endl;
+            return nullptr;
+        }
+
+        // In Unified Memory, device_ptr == host_ptr
+        return new Buffer(shape, ptr, ptr, this);
     }
 
     void free_buffer(void* device_ptr) override {
@@ -58,6 +78,11 @@ public:
             float* d_out = static_cast<float*>(op.output->device_handle());
             size_t n = op.output->size_bytes() / sizeof(float);
 
+            // Synchronize to ensure CPU writes are visible to GPU
+            // (Strictly speaking, cudaMallocManaged handles this on kernel launch, 
+            // but explicit sync helps debugging)
+            // cudaDeviceSynchronize(); 
+
             if (op.op_name == "add" || op.op_name == "mul") {
                 float* d_a = static_cast<float*>(op.inputs[0]->device_handle());
                 float* d_b = static_cast<float*>(op.inputs[1]->device_handle());
@@ -72,12 +97,11 @@ public:
                 }
             } 
             else if (op.op_name == "matmul") {
-                // CuBLAS assumes Column-Major. We use standard trick: C = B^T * A^T
-                // Or simply pass A and B but swap dimensions to match Row-Major expectation.
-                // Here we perform simple Row-Major mapped Sgemm:
                 float* d_a = static_cast<float*>(op.inputs[0]->device_handle());
                 float* d_b = static_cast<float*>(op.inputs[1]->device_handle());
                 
+                // cuBLAS expects column-major. We use C = B^T * A^T trick for row-major.
+                // Or standard sgemm if we treat data as row-major and swap dimensions.
                 int M = (int)op.inputs[0]->shape()[0];
                 int K = (int)op.inputs[0]->shape()[1];
                 int N = (int)op.inputs[1]->shape()[1];
@@ -85,17 +109,16 @@ public:
                 const float alpha = 1.0f;
                 const float beta = 0.0f;
 
-                // Note: cuBLAS is column-major, so we compute C^T = B^T * A^T
-                // effectively swapping A and B and dimensions
                 cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N,
                             N, M, K,
                             &alpha,
-                            d_b, N,  // B is first
-                            d_a, K,  // A is second
+                            d_b, N,  
+                            d_a, K,  
                             &beta,
                             d_out, N);
             }
         }
+        // Essential: Wait for GPU to finish so CPU can read results immediately
         cudaDeviceSynchronize();
     }
 

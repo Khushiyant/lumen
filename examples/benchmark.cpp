@@ -102,12 +102,42 @@ void benchmark_backend_comparison() {
     run_bench("cpu");   // Expect Slow (Naive C++ loop)
 }
 
+void test_intelligent_routing() {
+    std::cout << "\n--- Testing Intelligent Router ---" << std::endl;
+    lumen::Runtime rt;
+
+    // 1. Small Operation (Should route to CPU)
+    auto* A = rt.alloc({10}); 
+    auto* B = rt.alloc({10}); 
+    auto* C = rt.alloc({10});
+    
+    // CPU is faster for tiny ops (low latency)
+    rt.execute("add", {A, B}, C); 
+    // If you print rt.current_backend(), it should be 'cpu'
+
+    // 2. Heavy Operation (Should route to GPU if available)
+    size_t dim = 2048;
+    auto* BigA = rt.alloc({dim, dim});
+    auto* BigB = rt.alloc({dim, dim});
+    auto* BigC = rt.alloc({dim, dim});
+
+    // GPU is faster for throughput
+    rt.execute("matmul", {BigA, BigB}, BigC);
+    // If CUDA is working, it should switch. If broken, it falls back to CPU.
+
+    std::cout << "PASS: Intelligent Routing Logic Executed" << std::endl;
+    
+    delete A; delete B; delete C;
+    delete BigA; delete BigB; delete BigC;
+}
+
 int main() {
     std::cout << "--- Starting Lumen Multi-Backend Tests ---" << std::endl;
     
     test_cpu_fallback();
     test_metal_features();
     benchmark_backend_comparison();
+    test_intelligent_routing();
     
     std::cout << "--- All Tests Completed Successfully ---" << std::endl;
     return 0;
