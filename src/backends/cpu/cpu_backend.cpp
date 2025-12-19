@@ -94,21 +94,27 @@ public:
             float* A = (float*)op.inputs[0]->data();
             float* B = (float*)op.inputs[1]->data();
             float* C = out;
-            size_t M = op.inputs[0]->shape()[0];
-            size_t K = op.inputs[0]->shape()[1];
-            size_t N = op.inputs[1]->shape()[1];
+            int M = (int)op.inputs[0]->shape()[0];
+            int K = (int)op.inputs[0]->shape()[1];
+            int N = (int)op.inputs[1]->shape()[1];
 
-            
-                for (size_t i = 0; i < M; ++i) {
-                    for (size_t j = 0; j < N; ++j) {
-                        C[i * N + j] = 0.0f;
-                        for (size_t k = 0; k < K; ++k) {
-                            C[i * N + j] += A[i * K + k] * B[k * N + j];
+            #if defined(LUMEN_USE_OPENBLAS) || defined(__APPLE__)
+                // Use optimized BLAS for MatMul
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            M, N, K, 1.0f, A, K, B, N, 0.0f, C, N);
+            #else
+                // Fallback to naive loop only if no BLAS is found
+                for (int i = 0; i < M; ++i) {
+                    for (int j = 0; j < N; ++j) {
+                        float sum = 0.0f;
+                        for (int k = 0; k < K; ++k) {
+                            sum += A[i * K + k] * B[k * N + j];
                         }
+                        C[i * N + j] = sum;
                     }
- 
+                }
+            #endif
         }
-    }
     }
 }
 };
