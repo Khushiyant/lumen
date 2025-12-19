@@ -70,25 +70,24 @@ namespace lumen {
 
     void Runtime::run_startup_benchmarks() {
     for (auto& [name, backend] : backends_) {
-        // Benchmark a larger operation (e.g., 512x512 MatMul) to get real throughput
-        size_t dim = 512;
+        size_t dim = 256; 
         auto start = std::chrono::high_resolution_clock::now();
         auto* tA = backend->create_buffer({dim, dim});
         auto* tB = backend->create_buffer({dim, dim});
         auto* tC = backend->create_buffer({dim, dim});
         
-        backend->execute("matmul", {tA, tB}, tC); // Actual workload
+        backend->execute("matmul", {tA, tB}, tC);
         
         auto end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(end - start).count();
         
+        // Throughput in Millions of Ops per second
         metrics_[name]["matmul"] = {ms, (double)(dim * dim * dim) / (ms * 1e3)};
         delete tA; delete tB; delete tC;
     }
 }
-
     void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
-    // FIX: Respect manual override if active_backend_ is set
+    // FIX: Only use the router if no manual backend was selected
     Backend* target = active_backend_ ? active_backend_ : 
                       router_->select_backend(op_name, output->shape(), backends_, metrics_);
     
