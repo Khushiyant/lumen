@@ -145,6 +145,145 @@ void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& in
     }
 }
 
+
+// Add to src/core/runtime.mm
+
+void Runtime::record(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
+    // Just store the intent. Do zero work here.
+    op_queue_.push_back({op_name, inputs, output});
+}
+
+void Runtime::sync() {
+    if (op_queue_.empty()) return;
+
+#ifdef __APPLE__
+    id<MTLDevice> device = (id<MTLDevice>)mtl_device_;
+    
+    @autoreleasepool {
+        MPSGraph *graph = [[MPSGraph alloc] init];
+        
+        std::map<Buffer*, MPSGraphTensor*> buffer_to_tensor;
+        NSMutableDictionary<MPSGraphTensor*, MPSGraphTensorData*> *feeds = [NSMutableDictionary dictionary];
+        NSMutableArray<MPSGraphTensor*> *targetTensors = [NSMutableArray array];
+        NSMutableArray<MPSGraphTensorData*> *targetData = [NSMutableArray array];
+
+        for (const auto& op : op_queue_) {
+            size_t element_count = op.output->size() / sizeof(float);
+            
+            // --- SHAPE INFERENCE LOGIC ---
+            // Determine if this op should run in 2D (Matrix) mode or 1D (Vector) mode.
+            // Rule 1: MatMul is always 2D.
+            bool is_2d_op = (op.op_name == "matmul");
+            
+            // Rule 2: If not MatMul, check if any INPUT is already a 2D Tensor.
+            // (This handles the chain: MatMul(2D) -> Add(2D))
+            if (!is_2d_op) {
+                for (Buffer* buf : op.inputs) {
+                    if (buffer_to_tensor.count(buf)) {
+                        MPSGraphTensor *existingTensor = buffer_to_tensor[buf];
+                        if (existingTensor.shape.count == 2) {
+                            is_2d_op = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // --- RESOLVE INPUTS ---
+            NSMutableArray<MPSGraphTensor*> *inputTensors = [NSMutableArray array];
+            
+            for (Buffer* buf : op.inputs) {
+                if (buffer_to_tensor.count(buf)) {
+                    // Internal Link (Fusion)
+                    [inputTensors addObject:buffer_to_tensor[buf]];
+                } else {
+                    // External Input: Create Placeholder with CORRECT Shape
+                    NSArray<NSNumber *> *shape;
+                    if (is_2d_op) {
+                        int dim = sqrt(element_count);
+                        shape = @[@(dim), @(dim)];
+                    } else {
+                        shape = @[@(element_count)];
+                    }
+                    
+                    MPSGraphTensor *ph = [graph placeholderWithShape:shape dataType:MPSDataTypeFloat32 name:nil];
+                    [inputTensors addObject:ph];
+                    
+                    MPSGraphTensorData *data = [[MPSGraphTensorData alloc] initWithMTLBuffer:(id<MTLBuffer>)buf->device_handle() 
+                                                                                       shape:shape 
+                                                                                    dataType:MPSDataTypeFloat32];
+                    feeds[ph] = data;
+                    buffer_to_tensor[buf] = ph;
+                }
+            }
+            
+            // --- ADD NODE ---
+            MPSGraphTensor *result = nil;
+            if (op.op_name == "add") {
+                result = [graph additionWithPrimaryTensor:inputTensors[0] secondaryTensor:inputTensors[1] name:nil];
+            } 
+            else if (op.op_name == "mul") {
+                result = [graph multiplicationWithPrimaryTensor:inputTensors[0] secondaryTensor:inputTensors[1] name:nil];
+            } 
+            else if (op.op_name == "matmul") {
+                result = [graph matrixMultiplicationWithPrimaryTensor:inputTensors[0] secondaryTensor:inputTensors[1] name:nil];
+            }
+            
+            // --- REGISTER OUTPUT ---
+            if (result) {
+                buffer_to_tensor[op.output] = result;
+                [targetTensors addObject:result];
+                
+                // Match output data shape to the op mode
+                NSArray<NSNumber *> *outShape;
+                if (is_2d_op) {
+                     int dim = sqrt(element_count);
+                     outShape = @[@(dim), @(dim)];
+                } else {
+                     outShape = @[@(element_count)];
+                }
+
+                MPSGraphTensorData *outD = [[MPSGraphTensorData alloc] initWithMTLBuffer:(id<MTLBuffer>)op.output->device_handle() 
+                                                                                   shape:outShape 
+                                                                                dataType:MPSDataTypeFloat32];
+                [targetData addObject:outD];
+            }
+        }
+        
+        // --- COMPILE & RUN ---
+        
+        // 1. Convert Data Feeds to Type Feeds for Compilation
+        NSMutableDictionary<MPSGraphTensor*, MPSGraphShapedType*> *typeFeeds = [NSMutableDictionary dictionary];
+        NSMutableArray<MPSGraphTensorData*> *inputsArray = [NSMutableArray array];
+        
+        for (MPSGraphTensor *tensor in [feeds keyEnumerator]) {
+            MPSGraphTensorData *data = feeds[tensor];
+            MPSGraphShapedType *shapedType = [[MPSGraphShapedType alloc] initWithShape:data.shape 
+                                                                              dataType:data.dataType];
+            typeFeeds[tensor] = shapedType;
+            [inputsArray addObject:data];
+        }
+
+        // 2. Compile
+        MPSGraphExecutable *exec = [graph compileWithDevice:[MPSGraphDevice deviceWithMTLDevice:device] 
+                                                      feeds:typeFeeds 
+                                              targetTensors:targetTensors 
+                                           targetOperations:nil 
+                                      compilationDescriptor:nil];
+
+        // 3. Run
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        [exec runWithMTLCommandQueue:queue 
+                         inputsArray:inputsArray
+                        resultsArray:targetData 
+                 executionDescriptor:nil];
+    }
+#endif
+    op_queue_.clear();
+}
+
+
+// --- GPU Execution via MPSGraph ---
 void Runtime::run_gpu(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
 #ifdef __APPLE__
     id<MTLDevice> device = (id<MTLDevice>)mtl_device_;

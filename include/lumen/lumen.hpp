@@ -36,12 +36,26 @@ struct TuningConfig {
 // Define the worker type for the registry
 using OpWorker = std::function<void(const std::vector<Buffer*>&, Buffer*)>;
 
+// lumen/include/lumen/lumen.hpp
+struct QueuedOp {
+    std::string op_name;
+    std::vector<Buffer*> inputs;
+    Buffer* output;
+};
+
+
 class Runtime {
 public:
     Runtime();
     ~Runtime();
     
     Buffer* alloc(size_t size);
+
+    // New: Record operations without running them yet
+    void record(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output);
+    
+    // New: Fuse everything in the queue into ONE single GPU pass
+    void sync(); 
 
     void execute(const std::string& op_name, 
                  const std::vector<Buffer*>& inputs, 
@@ -55,6 +69,7 @@ private:
     void* mtl_device_;
     std::map<std::string, void*> pipeline_cache_;
     TuningConfig config_;
+    std::vector<QueuedOp> op_queue_;
 
     // Registry maps for "Plug-and-Play" operations
     std::map<std::string, OpWorker> cpu_ops_;
