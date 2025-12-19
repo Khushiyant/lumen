@@ -66,12 +66,13 @@ namespace lumen {
         return active_backend_->create_buffer(shape);
     }
 
-    void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
+    // lumen/src/core/runtime.cpp
+void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
     Backend* best_backend = router_->select_backend(op_name, output->shape(), backends_);
 
+    // 1. Switch the active backend if the router found a better one
     if (best_backend != active_backend_) {
         active_backend_ = best_backend;
-        // Dynamically find the name of the selected backend
         for (auto const& [name, ptr] : backends_) {
             if (ptr.get() == best_backend) {
                 active_backend_name_ = name;
@@ -80,6 +81,27 @@ namespace lumen {
         }
     }
 
+    // 2. MIGRATE: Ensure all buffers are compatible with the selected backend
+    auto ensure_backend = [this](Buffer* buf) {
+        if (buf->creator() != active_backend_) {
+            // Create a new buffer on the correct hardware
+            Buffer* new_storage = active_backend_->create_buffer(buf->shape());
+            
+            // Copy existing data from host memory
+            std::memcpy(new_storage->data(), buf->data(), buf->size_bytes());
+            
+            // Update the buffer's internal state to the new device handle
+            buf->migrate(new_storage->device_handle(), new_storage->data(), active_backend_);
+            
+            // Cleanup the temporary container (but not the memory we just moved)
+            // Note: In a production system, you'd use a more robust hand-off
+        }
+    };
+
+    for (auto* in : inputs) ensure_backend(in);
+    ensure_backend(output);
+
+    // 3. Now safe to execute on the GPU
     active_backend_->execute(op_name, inputs, output);
 }
 

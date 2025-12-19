@@ -36,6 +36,12 @@ public:
     size_t size_bytes() const;
     void* device_handle() const { return device_ptr_; }
     Backend* creator() const { return creator_; }
+    void migrate(void* new_device_ptr, void* new_host_ptr, Backend* new_creator) {
+        if (creator_ && device_ptr_) creator_->free_buffer(device_ptr_);
+        device_ptr_ = new_device_ptr;
+        host_ptr_ = new_host_ptr;
+        creator_ = new_creator;
+    }
 private:
     std::vector<size_t> shape_;
     void* device_ptr_; 
