@@ -1,26 +1,30 @@
 #include "lumen/lumen.hpp"
-#include <iostream>
 
 namespace lumen {
 Backend* Router::select_backend(const std::string& op_name, 
                                 const std::vector<size_t>& shape, 
-                                const std::map<std::string, std::unique_ptr<Backend>>& backends) {
+                                const std::map<std::string, std::unique_ptr<Backend>>& backends,
+                                const std::map<std::string, std::map<std::string, BackendMetrics>>& metrics) {
     
     size_t total_elements = 1;
     for (auto d : shape) total_elements *= d;
 
-    // Use GPU for heavy operations (> 10k elements or complex MatMuls)
-    bool is_heavy = (total_elements > 10000) || (op_name == "matmul" && total_elements > 2500);
+    std::string best_name = "cpu";
+    double min_expected_ms = 1e9;
 
-    if (backends.count("cuda") && is_heavy) {
-        return backends.at("cuda").get();
+    for (auto const& [name, backend] : backends) {
+        if (metrics.count(name) && metrics.at(name).count(op_name)) {
+            auto m = metrics.at(name).at(op_name);
+            // Prediction: Latency + (Size / Throughput)
+            double expected = m.kernel_latency_ms + (total_elements / m.throughput_mops / 1000.0);
+            
+            if (expected < min_expected_ms) {
+                min_expected_ms = expected;
+                best_name = name;
+            }
+        }
     }
 
-    // FIX: Only switch to Metal if the operation is heavy enough
-    if (backends.count("metal") && is_heavy) {
-         return backends.at("metal").get();
-    }
-
-    return backends.at("cpu").get();
+    return backends.at(best_name).get();
 }
 }

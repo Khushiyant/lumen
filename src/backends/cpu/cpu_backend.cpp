@@ -4,7 +4,6 @@
 #include <cstring>
 #include <cmath>
 
-// 1. Include the correct headers based on the OS/Library
 #ifdef __APPLE__
     #ifndef ACCELERATE_NEW_LAPACK
         #define ACCELERATE_NEW_LAPACK
@@ -35,7 +34,8 @@ public:
         size_t total_elements = 1;
         for (auto d : shape) total_elements *= d;
         float* ptr = new float[total_elements];
-        return new Buffer(shape, ptr, ptr, this);
+        // FIX: Added nullptr as the 5th argument (Runtime* rt)
+        return new Buffer(shape, ptr, ptr, this, nullptr);
     }
 
     void free_buffer(void* device_ptr) override {
@@ -59,9 +59,6 @@ public:
                 #ifdef __APPLE__
                     vDSP_vadd(A, 1, B, 1, out, 1, size);
                 #else
-                    // OpenBLAS provides cblas_saxpy, but strictly that's Y = a*X + Y.
-                    // For simple add, a vectorized loop or OpenMP is standard.
-                    // We stick to loop for clarity, or you can use optimized SIMD here.
                     for (size_t i = 0; i < size; ++i) out[i] = A[i] + B[i];
                 #endif
             } 
@@ -69,7 +66,6 @@ public:
                 float* A = static_cast<float*>(op.inputs[0]->data());
                 float* B = static_cast<float*>(op.inputs[1]->data());
                 
-                // Get Dimensions
                 long M = (long)op.inputs[0]->shape()[0];
                 long K = (long)op.inputs[0]->shape()[1];
                 long N = (long)op.inputs[1]->shape()[1];
@@ -78,14 +74,10 @@ public:
                     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, 
                                 M, N, K, 1.0f, A, K, B, N, 0.0f, out, N);
                 #elif defined(LUMEN_USE_OPENBLAS)
-                    // OpenBLAS Implementation
-                    // Note: OpenBLAS uses 'int' for standard LAPACK, 'long' if ILP64.
-                    // Standard OpenBLAS install is usually 32-bit int interface.
                     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, 
                                 (int)M, (int)N, (int)K, 
                                 1.0f, A, (int)K, B, (int)N, 0.0f, out, (int)N);
                 #else
-                    // Slow Fallback
                     std::memset(out, 0, M * N * sizeof(float));
                     for (int m = 0; m < M; ++m) {
                         for (int n = 0; n < N; ++n) {

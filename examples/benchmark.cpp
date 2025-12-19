@@ -79,16 +79,16 @@ void benchmark_backend_comparison() {
         auto* B = rt.alloc({dim, dim});
         auto* C = rt.alloc({dim, dim});
 
-        // Init
-        float* ptr = (float*)A->data();
-        for(size_t i=0; i<dim*dim; i++) ptr[i] = 1.0f;
-
-        // Warmup
+        // Warmup: Queue AND execute
         rt.execute("matmul", {A, B}, C);
+        rt.submit(); // Force hardware execution
 
-        // Measure
+        // Measure: Include the submission time
         auto start = std::chrono::high_resolution_clock::now();
+        
         rt.execute("matmul", {A, B}, C);
+        rt.submit(); // CRITICAL: This is where the actual work happens
+        
         auto end = std::chrono::high_resolution_clock::now();
 
         std::cout << "PASS: " << backend << " MatMul (" << dim << "x" << dim << ")" << std::endl;

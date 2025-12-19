@@ -11,13 +11,13 @@ namespace lumen {
 class MetalBackend : public Backend {
 public:
     MetalBackend() {
-    device_ = MTLCreateSystemDefaultDevice();
-    if (!device_) {
-        std::cerr << "[Lumen] Metal Error: No Metal-capable GPU detected." << std::endl;
-        return;
+        device_ = MTLCreateSystemDefaultDevice();
+        if (!device_) {
+            std::cerr << "[Lumen] Metal Error: No Metal-capable GPU detected." << std::endl;
+            return;
+        }
+        command_queue_ = [device_ newCommandQueue];
     }
-    command_queue_ = [device_ newCommandQueue];
-}
 
     Buffer* create_buffer(const std::vector<size_t>& shape) override {
         size_t total_elements = 1;
@@ -25,13 +25,12 @@ public:
         size_t size = total_elements * sizeof(float);
         
         id<MTLBuffer> buf = [device_ newBufferWithLength:size options:MTLResourceStorageModeShared];
-        // Use __bridge_retained to hand control of the buffer to the C++ object
-        return new Buffer(shape, (__bridge_retained void*)buf, [buf contents], this);
+        // FIX: Added nullptr as the 5th argument (Runtime* rt)
+        return new Buffer(shape, (__bridge_retained void*)buf, [buf contents], this, nullptr);
     }
 
     void free_buffer(void* device_ptr) override {
         if (device_ptr) {
-            // Transfer ownership back to ARC to allow proper release
             id<MTLBuffer> buf = (__bridge_transfer id<MTLBuffer>)device_ptr;
             buf = nil;
         }
@@ -47,7 +46,6 @@ public:
         if (queue.empty()) return;
         
         @autoreleasepool {
-            // 1. Enhanced Cache Key: Includes specific shapes to prevent collision
             std::stringstream key_builder;
             for (const auto& op : queue) {
                 key_builder << op.op_name << "(";
@@ -63,7 +61,6 @@ public:
 
             MPSGraphExecutable *executable = (__bridge MPSGraphExecutable*)pipeline_cache_[cache_key];
             
-            // 2. Setup Graph
             MPSGraph *graph = [[MPSGraph alloc] init];
             std::map<Buffer*, MPSGraphTensor*> buffer_to_tensor;
             NSMutableArray<MPSGraphTensorData*> *inputsArray = [NSMutableArray array];
@@ -77,7 +74,6 @@ public:
                     if (buffer_to_tensor.count(buf)) {
                         [ins addObject:buffer_to_tensor[buf]];
                     } else {
-                        // Use the explicit Buffer shape for the placeholder
                         NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
                         for (auto d : buf->shape()) [ns_shape addObject:@(d)];
                         
@@ -91,7 +87,7 @@ public:
 
                 MPSGraphTensor *res = nil;
                 if (op.op_name == "add") res = [graph additionWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil];
-                else if (op.op_name == "mul") res = [graph multiplicationWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil]; // Added mul support
+                else if (op.op_name == "mul") res = [graph multiplicationWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil];
                 else if (op.op_name == "matmul") res = [graph matrixMultiplicationWithPrimaryTensor:ins[0] secondaryTensor:ins[1] name:nil];
 
                 if (res) {
@@ -103,7 +99,6 @@ public:
                 }
             }
 
-            // 3. Compile and Run
             if (!executable) {
                 NSMutableDictionary *typeFeeds = [NSMutableDictionary dictionary];
                 for (NSUInteger i = 0; i < orderedPlaceholders.count; i++) {

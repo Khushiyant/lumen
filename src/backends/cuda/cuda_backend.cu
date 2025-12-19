@@ -7,7 +7,6 @@
 
 namespace lumen {
 
-// Simple CUDA kernels for element-wise ops
 __global__ void add_kernel(const float* a, const float* b, float* c, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) c[i] = a[i] + b[i];
@@ -32,10 +31,8 @@ public:
             throw std::runtime_error("No CUDA-capable devices found on this system.");
         }
 
-        // Set to first available device
         cudaSetDevice(0);
 
-        // Initialize cuBLAS for Matrix Multiplications
         cublasStatus_t stat = cublasCreate(&cublas_handle_);
         if (stat != CUBLAS_STATUS_SUCCESS) {
             throw std::runtime_error("Failed to initialize cuBLAS.");
@@ -54,7 +51,6 @@ public:
         size_t size = total_elements * sizeof(float);
 
         void* ptr = nullptr;
-        // ZERO-COPY: Allocate memory that is visible to both CPU and GPU
         cudaError_t err = cudaMallocManaged(&ptr, size);
         
         if (err != cudaSuccess) {
@@ -62,7 +58,8 @@ public:
             return nullptr;
         }
 
-        return new Buffer(shape, ptr, ptr, this);
+        // FIX: Added nullptr as the 5th argument (Runtime* rt)
+        return new Buffer(shape, ptr, ptr, this, nullptr);
     }
 
     void free_buffer(void* device_ptr) override {
@@ -103,7 +100,6 @@ public:
                 const float alpha = 1.0f;
                 const float beta = 0.0f;
 
-                // cuBLAS standard SGEMM
                 cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N,
                             N, M, K,
                             &alpha,
@@ -113,7 +109,6 @@ public:
                             d_out, N);
             }
         }
-        // Ensure GPU is finished before returning control to CPU (Zero-Copy Sync)
         cudaDeviceSynchronize();
     }
 
