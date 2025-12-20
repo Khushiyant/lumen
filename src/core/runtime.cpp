@@ -69,6 +69,7 @@ namespace lumen {
         run_startup_benchmarks();
         active_backend_name_ = "dynamic";
         active_backend_ = nullptr; 
+        router_ = std::make_unique<Router>();
     }
 
     Runtime::~Runtime() { wait_all(); }
