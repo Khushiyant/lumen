@@ -9,7 +9,6 @@
 
 namespace lumen {
 
-// Metadata structure to ensure execution matches compilation
 struct CachedPipeline {
     MPSGraphExecutable *executable;
     NSMutableArray<MPSGraphTensor *> *orderedPlaceholders;
@@ -24,6 +23,7 @@ public:
             return;
         }
         command_queue_ = [device_ newCommandQueue];
+        std::cout << "[Lumen] Metal Backend Initialized with Memory Pooling" << std::endl;
     }
 
     Buffer* create_buffer(const std::vector<size_t>& shape) override {
@@ -31,7 +31,18 @@ public:
         for (auto d : shape) total_elements *= d;
         size_t size = total_elements * sizeof(float);
         
-        id<MTLBuffer> buf = [device_ newBufferWithLength:size options:MTLResourceStorageModeShared];
+        // 1. Try to acquire from pool
+        void* device_ptr = pool_.acquire(size);
+        id<MTLBuffer> buf = nil;
+
+        if (device_ptr) {
+            // Reuse existing buffer
+            buf = (__bridge id<MTLBuffer>)device_ptr;
+        } else {
+            // 2. Allocate new buffer if pool is empty
+            buf = [device_ newBufferWithLength:size options:MTLResourceStorageModeShared];
+            device_ptr = (__bridge_retained void*)buf; // Keep reference alive for the pool
+        }
 
         std::vector<size_t> strides(shape.size());
         size_t s = 1;
@@ -40,13 +51,14 @@ public:
             s *= shape[i];
         }
 
-        return new Buffer(shape, strides, (__bridge_retained void*)buf, [buf contents], this, 0);
+        return new Buffer(shape, strides, device_ptr, [buf contents], this, 0);
     }
 
-    void free_buffer(void* device_ptr) override {
+    // FIXED: Updated signature to match Backend base class
+    void free_buffer(void* device_ptr, size_t size) override {
         if (device_ptr) {
-            id<MTLBuffer> buf = (__bridge_transfer id<MTLBuffer>)device_ptr;
-            buf = nil;
+            // Return to pool instead of releasing immediately
+            pool_.release(device_ptr, size);
         }
     }
 
@@ -63,7 +75,6 @@ public:
             NSMutableArray<MPSGraphTensorData*> *inputsArray = [NSMutableArray array];
             NSMutableArray<MPSGraphTensorData*> *targetData = [NSMutableArray array];
 
-            // 1. Check Cache or Compile
             if (pipeline_cache_.find(cache_key) == pipeline_cache_.end()) {
                 MPSGraph *graph = [[MPSGraph alloc] init];
                 std::map<Buffer*, MPSGraphTensor*> buffer_to_tensor;
@@ -109,7 +120,6 @@ public:
                 pipeline_cache_[cache_key] = {exe, orderedPlaceholders};
             }
 
-            // 2. Map current buffers to the fixed placeholder order
             const auto& pipeline = pipeline_cache_[cache_key];
             std::map<Buffer*, MPSGraphTensorData*> current_data_map;
             
@@ -122,16 +132,12 @@ public:
                 [targetData addObject:create_tensor_data(op.output)];
             }
 
-            // Populate inputsArray in the EXACT order expected by the executable
-            // We use the queue topology to match buffers to the original placeholder positions
-            size_t placeholder_idx = 0;
             std::map<Buffer*, bool> seen;
             for (const auto& op : queue) {
                 for (Buffer* buf : op.inputs) {
                     if (!seen[buf]) {
                         [inputsArray addObject:current_data_map[buf]];
                         seen[buf] = true;
-                        placeholder_idx++;
                     }
                 }
             }

@@ -25,7 +25,8 @@ namespace lumen {
             runtime_context_->submit();
         }
         if (!is_view_ && creator_ && device_ptr_) {
-            creator_->free_buffer(device_ptr_);
+            // Pass size_bytes() so the backend pool knows where to categorize the block
+            creator_->free_buffer(device_ptr_, this->size_bytes());
         }
     }
 

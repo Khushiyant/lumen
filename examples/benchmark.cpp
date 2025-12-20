@@ -69,7 +69,7 @@ void test_metal_features() {
 // 3. Compare Performance: Metal vs CPU
 void benchmark_backend_comparison() {
     lumen::Runtime rt;
-    size_t dim = 1024;
+    size_t dim = 4096;
     
     auto run_bench = [&](const std::string& backend) {
         rt.set_backend(backend);

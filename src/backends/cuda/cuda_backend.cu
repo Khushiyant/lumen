@@ -21,39 +21,30 @@ class CUDABackend : public Backend {
 public:
     CUDABackend() {
         int deviceCount = 0;
-        cudaError_t err = cudaGetDeviceCount(&deviceCount);
-        
-        if (err != cudaSuccess) {
-            throw std::runtime_error("CUDA Driver Error: " + std::string(cudaGetErrorString(err)));
-        }
-        
-        if (deviceCount == 0) {
-            throw std::runtime_error("No CUDA-capable devices found on this system.");
-        }
+        cudaGetDeviceCount(&deviceCount);
+        if (deviceCount == 0) throw std::runtime_error("No CUDA devices found.");
 
         cudaSetDevice(0);
-
-        cublasStatus_t stat = cublasCreate(&cublas_handle_);
-        if (stat != CUBLAS_STATUS_SUCCESS) {
-            throw std::runtime_error("Failed to initialize cuBLAS.");
-        }
-
-        std::cout << "[Lumen] CUDA Backend Initialized (Unified Memory Mode)" << std::endl;
+        cublasCreate(&cublas_handle_);
+        std::cout << "[Lumen] CUDA Backend Initialized with Memory Pooling" << std::endl;
     }
 
     ~CUDABackend() {
         if (cublas_handle_) cublasDestroy(cublas_handle_);
     }
 
-    Buffer* create_buffer(const std::vector<size_t>& shape) {
+    Buffer* create_buffer(const std::vector<size_t>& shape) override {
         size_t total_elements = 1;
         for (auto d : shape) total_elements *= d;
         size_t size = total_elements * sizeof(float);
 
-        void* ptr = nullptr;
-        cudaMallocManaged(&ptr, size); // Unified Memory
+        // 1. Try pool first
+        void* ptr = pool_.acquire(size);
+        if (!ptr) {
+            // 2. Allocate Unified Memory if pool empty
+            cudaMallocManaged(&ptr, size);
+        }
 
-        // Calculate strides
         std::vector<size_t> strides(shape.size());
         size_t s = 1;
         for (int i = (int)shape.size() - 1; i >= 0; --i) {
@@ -64,8 +55,11 @@ public:
         return new Buffer(shape, strides, ptr, ptr, this, 0);
     }
 
-    void free_buffer(void* device_ptr) override {
-        if (device_ptr) cudaFree(device_ptr);
+    // FIXED: Updated signature to match Backend base class
+    void free_buffer(void* device_ptr, size_t size) override {
+        if (device_ptr) {
+            pool_.release(device_ptr, size);
+        }
     }
 
     void execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) override {
@@ -85,30 +79,15 @@ public:
                 int threads = 256;
                 int blocks = (n + threads - 1) / threads;
 
-                if (op.op_name == "add") {
-                    add_kernel<<<blocks, threads>>>(d_a, d_b, d_out, n);
-                } else {
-                    mul_kernel<<<blocks, threads>>>(d_a, d_b, d_out, n);
-                }
+                if (op.op_name == "add") add_kernel<<<blocks, threads>>>(d_a, d_b, d_out, n);
+                else mul_kernel<<<blocks, threads>>>(d_a, d_b, d_out, n);
             } 
             else if (op.op_name == "matmul") {
                 float* d_a = static_cast<float*>(op.inputs[0]->device_handle());
                 float* d_b = static_cast<float*>(op.inputs[1]->device_handle());
-                
-                int M = (int)op.inputs[0]->shape()[0];
-                int K = (int)op.inputs[0]->shape()[1];
-                int N = (int)op.inputs[1]->shape()[1];
-
-                const float alpha = 1.0f;
-                const float beta = 0.0f;
-
-                cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N,
-                            N, M, K,
-                            &alpha,
-                            d_b, N,  
-                            d_a, K,  
-                            &beta,
-                            d_out, N);
+                int M = (int)op.inputs[0]->shape()[0], K = (int)op.inputs[0]->shape()[1], N = (int)op.inputs[1]->shape()[1];
+                const float alpha = 1.0f, beta = 0.0f;
+                cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, d_b, N, d_a, K, &beta, d_out, N);
             }
         }
         cudaDeviceSynchronize();

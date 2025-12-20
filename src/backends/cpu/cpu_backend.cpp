@@ -25,10 +25,18 @@ public:
     }
 
 
-    Buffer* create_buffer(const std::vector<size_t>& shape) override { // Added override
+    Buffer* create_buffer(const std::vector<size_t>& shape) override {
         size_t total_elements = 1;
         for (auto d : shape) total_elements *= d;
-        float* ptr = new float[total_elements];
+        size_t size = total_elements * sizeof(float);
+
+        // 1. Try to acquire from pool
+        void* ptr = pool_.acquire(size);
+        
+        // 2. Fallback to allocation if pool is empty
+        if (!ptr) {
+            ptr = new float[total_elements];
+        }
 
         std::vector<size_t> strides(shape.size());
         size_t s = 1;
@@ -39,8 +47,11 @@ public:
         return new Buffer(shape, strides, ptr, ptr, this, 0);
     }
 
-    void free_buffer(void* device_ptr) override {
-        if (device_ptr) delete[] static_cast<float*>(device_ptr);
+    void free_buffer(void* device_ptr, size_t size) override {
+        if (device_ptr) {
+            // Instead of deleting, return to pool
+            pool_.release(device_ptr, size);
+        }
     }
 
     void execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) override {
