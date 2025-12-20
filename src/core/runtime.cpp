@@ -6,6 +6,7 @@
 
 namespace lumen {
 
+    // Forward declarations for backend creation functions
     std::unique_ptr<Backend> create_cpu_backend();
     #ifdef LUMEN_USE_METAL
     std::unique_ptr<Backend> create_metal_backend();
@@ -22,10 +23,10 @@ namespace lumen {
     
     Buffer::~Buffer() { 
         if (!is_view_ && runtime_context_) {
-            runtime_context_->submit();
+            runtime_context_->wait_all(); // Ensure work is done before freeing
         }
         if (!is_view_ && creator_ && device_ptr_) {
-            // Pass size_bytes() so the backend pool knows where to categorize the block
+            // Pass size to the pool for categorization
             creator_->free_buffer(device_ptr_, this->size_bytes());
         }
     }
@@ -39,7 +40,7 @@ namespace lumen {
 
     void* Buffer::data() {
         if (location_ == BufferLocation::DEVICE_ONLY && runtime_context_) {
-            runtime_context_->submit();
+            runtime_context_->wait_all(); // Sync before CPU access
         }
         return (char*)host_ptr_ + (offset_ * sizeof(float));
     }
@@ -63,20 +64,24 @@ namespace lumen {
 
         run_startup_benchmarks();
         active_backend_name_ = "dynamic";
-        active_backend_ = nullptr; // Start in dynamic/routing mode
+        active_backend_ = nullptr; 
     }
 
-    Runtime::~Runtime() { submit(); }
+    Runtime::~Runtime() { wait_all(); }
 
     void Runtime::run_startup_benchmarks() {
         for (auto& [name, backend] : backends_) {
-            size_t dim = 256; // Larger test for better throughput estimation
+            size_t dim = 256; 
             auto start = std::chrono::high_resolution_clock::now();
             auto* tA = backend->create_buffer({dim, dim});
             auto* tB = backend->create_buffer({dim, dim});
             auto* tC = backend->create_buffer({dim, dim});
             
-            backend->execute("matmul", {tA, tB}, tC);
+            // FIXED: Create a named variable to resolve the lvalue reference error
+            std::vector<QueuedOp> startup_queue = {{ "matmul", {tA, tB}, tC, name }};
+            auto ev = backend->sync(startup_queue);
+            
+            if (ev) ev->wait();
             
             auto end = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count();
@@ -86,8 +91,8 @@ namespace lumen {
             delete tA; delete tB; delete tC;
         }
     }
+
     void Runtime::execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) {
-        // FIX: Respect manual selection if active_backend_ is not null
         Backend* target = active_backend_ ? active_backend_ : 
                           router_->select_backend(op_name, output->shape(), backends_, metrics_);
         
@@ -100,13 +105,13 @@ namespace lumen {
         output->set_location(BufferLocation::DEVICE_ONLY);
     }
 
-    void Runtime::submit() {
-        if (queue_.empty()) return;
+    std::vector<std::shared_ptr<Event>> Runtime::submit() {
+        if (queue_.empty()) return {};
 
-        // Use local copy to prevent recursive sync issues
         std::vector<QueuedOp> current_queue = std::move(queue_);
         queue_.clear(); 
 
+        std::vector<std::shared_ptr<Event>> new_events;
         size_t i = 0;
         while (i < current_queue.size()) {
             std::string target = current_queue[i].target_backend;
@@ -118,13 +123,25 @@ namespace lumen {
             }
 
             if (backends_.count(target)) {
-                backends_[target]->sync(group);
+                auto ev = backends_[target]->sync(group);
+                if (ev) {
+                    new_events.push_back(ev);
+                    inflight_events_.push_back(ev);
+                }
             }
             
             for (auto& op : group) {
                 op.output->set_location(BufferLocation::BOTH_SYNCED);
             }
         }
+        return new_events;
+    }
+
+    void Runtime::wait_all() {
+        for (auto& ev : inflight_events_) {
+            if (ev) ev->wait();
+        }
+        inflight_events_.clear();
     }
 
     Buffer* Runtime::alloc(const std::vector<size_t>& shape) {

@@ -67,7 +67,7 @@ public:
         sync(q);
     }
 
-    void sync(std::vector<QueuedOp>& queue) override {
+    std::shared_ptr<Event> sync(std::vector<QueuedOp>& queue) override {
         for (const auto& op : queue) {
             float* d_out = static_cast<float*>(op.output->device_handle());
             size_t n = op.output->size_bytes() / sizeof(float);
@@ -91,6 +91,7 @@ public:
             }
         }
         cudaDeviceSynchronize();
+        return std::make_shared<CUDAEvent>();
     }
 
 private:

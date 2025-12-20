@@ -9,6 +9,16 @@
 
 namespace lumen {
 
+// Event implementation for Metal to track command buffer status asynchronously
+class MetalEvent : public Event {
+public:
+    MetalEvent(id<MTLCommandBuffer> cb) : cb_(cb) {}
+    void wait() override { [cb_ waitUntilCompleted]; }
+    bool is_completed() override { return cb_.status >= MTLCommandBufferStatusCompleted; }
+private:
+    id<MTLCommandBuffer> cb_;
+};
+
 struct CachedPipeline {
     MPSGraphExecutable *executable;
     NSMutableArray<MPSGraphTensor *> *orderedPlaceholders;
@@ -31,17 +41,16 @@ public:
         for (auto d : shape) total_elements *= d;
         size_t size = total_elements * sizeof(float);
         
-        // 1. Try to acquire from pool
+        // Try to acquire from the memory pool first
         void* device_ptr = pool_.acquire(size);
         id<MTLBuffer> buf = nil;
 
         if (device_ptr) {
-            // Reuse existing buffer
             buf = (__bridge id<MTLBuffer>)device_ptr;
         } else {
-            // 2. Allocate new buffer if pool is empty
+            // Allocate new buffer if pool is empty
             buf = [device_ newBufferWithLength:size options:MTLResourceStorageModeShared];
-            device_ptr = (__bridge_retained void*)buf; // Keep reference alive for the pool
+            device_ptr = (__bridge_retained void*)buf; 
         }
 
         std::vector<size_t> strides(shape.size());
@@ -54,10 +63,10 @@ public:
         return new Buffer(shape, strides, device_ptr, [buf contents], this, 0);
     }
 
-    // FIXED: Updated signature to match Backend base class
+    // FIXED: Updated signature to match the virtual method in Backend base class
     void free_buffer(void* device_ptr, size_t size) override {
         if (device_ptr) {
-            // Return to pool instead of releasing immediately
+            // Return the block to the pool for reuse instead of immediate release
             pool_.release(device_ptr, size);
         }
     }
@@ -67,8 +76,9 @@ public:
         this->sync(single_op_queue);
     }
 
-    void sync(std::vector<QueuedOp>& queue) override {
-        if (queue.empty()) return;
+    // FIXED: Signature changed to return std::shared_ptr<Event>
+    std::shared_ptr<Event> sync(std::vector<QueuedOp>& queue) override {
+        if (queue.empty()) return nullptr;
         
         @autoreleasepool {
             std::string cache_key = build_cache_key(queue);
@@ -149,7 +159,9 @@ public:
 
             id<MTLCommandBuffer> commandBuffer = [command_queue_ commandBuffer];
             [commandBuffer commit];
-            [commandBuffer waitUntilCompleted];
+            
+            // Returns the event handler instead of blocking the CPU with waitUntilCompleted
+            return std::make_shared<MetalEvent>(commandBuffer);
         }
     }
 

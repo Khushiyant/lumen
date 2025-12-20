@@ -10,7 +10,6 @@
 namespace lumen {
 
 // --- Pillar 1: Foundational Memory Pool ---
-// Manages a cache of reusable memory blocks to avoid expensive syscalls
 class MemoryPool {
 public:
     struct Block {
@@ -20,35 +19,33 @@ public:
 
     void* acquire(size_t size) {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Look for an exact match or a slightly larger block
         for (auto it = free_blocks_.begin(); it != free_blocks_.end(); ++it) {
-            if (it->size >= size && it->size <= size * 1.2) { // 20% tolerance
+            if (it->size >= size && it->size <= size * 1.2) {
                 void* ptr = it->ptr;
                 free_blocks_.erase(it);
                 return ptr;
             }
         }
-        return nullptr; // No suitable block found
+        return nullptr;
     }
 
     void release(void* ptr, size_t size) {
         std::lock_guard<std::mutex> lock(mutex_);
         free_blocks_.push_back({ptr, size});
-        // Optional: Keep pool size in check by pruning old blocks
-        if (free_blocks_.size() > 64) {
-            // In a real implementation, you'd trigger an actual free here
-        }
-    }
-
-    ~MemoryPool() {
-        // Note: Actual freeing of remaining blocks must be handled 
-        // by the Backend that owns the pointers.
     }
 
 private:
     std::list<Block> free_blocks_;
     std::mutex mutex_;
-};
+}; // Corrected: Semicolon added
+
+// --- Pillar 2: Asynchronous Events ---
+class Event {
+public:
+    virtual ~Event() = default;
+    virtual void wait() = 0;
+    virtual bool is_completed() = 0;
+}; // Corrected: Semicolon added
 
 class Buffer;
 class Backend;
@@ -73,12 +70,14 @@ class Backend {
 public:
     virtual ~Backend() = default;
     virtual Buffer* create_buffer(const std::vector<size_t>& shape) = 0;
-    virtual void free_buffer(void* device_ptr, size_t size) = 0; // Updated to include size
+    virtual void free_buffer(void* device_ptr, size_t size) = 0;
     virtual void execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output) = 0;
-    virtual void sync(std::vector<QueuedOp>& queue) = 0;
+    
+    // Updated signature: returns an Event
+    virtual std::shared_ptr<Event> sync(std::vector<QueuedOp>& queue) = 0;
 
 protected:
-    MemoryPool pool_; // Each backend owns its specific memory pool
+    MemoryPool pool_;
 };
 
 class Buffer {
@@ -95,7 +94,7 @@ public:
     size_t size_bytes() const;
     void* device_handle() const { return (char*)device_ptr_ + (offset_ * sizeof(float)); }
     Backend* creator() const { return creator_; }
-
+    
     Buffer* view(const std::vector<size_t>& new_shape, const std::vector<size_t>& new_strides, size_t new_offset = 0);
 
     void set_location(BufferLocation loc) { location_ = loc; }
@@ -128,7 +127,10 @@ public:
     
     Buffer* alloc(const std::vector<size_t>& shape);
     void execute(const std::string& op_name, const std::vector<Buffer*>& inputs, Buffer* output);
-    void submit(); 
+    
+    // Updated: Returns vector of events and manages inflight events
+    std::vector<std::shared_ptr<Event>> submit(); 
+    void wait_all();
 
     void set_backend(const std::string& name);
     std::string current_backend() const;
@@ -139,6 +141,7 @@ private:
     std::map<std::string, std::unique_ptr<Backend>> backends_;
     std::map<std::string, std::map<std::string, BackendMetrics>> metrics_;
     std::vector<QueuedOp> queue_;
+    std::vector<std::shared_ptr<Event>> inflight_events_; // Added member
     
     Backend* active_backend_; 
     std::string active_backend_name_;

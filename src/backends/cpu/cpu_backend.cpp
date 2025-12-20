@@ -11,7 +11,11 @@
 #endif
 
 namespace lumen {
-
+class CPUEvent : public Event {
+public:
+    void wait() override {} // Already done
+    bool is_completed() override { return true; }
+};
 class CPUBackend : public Backend {
 public:
     CPUBackend() {
@@ -59,7 +63,7 @@ public:
         sync(q);
     }
 
-    void sync(std::vector<QueuedOp>& queue) override {
+    std::shared_ptr<Event> sync(std::vector<QueuedOp>& queue) override {
     for (const auto& op : queue) {
         float* out = (float*)op.output->data();
         size_t n = op.output->size_bytes() / sizeof(float);
@@ -116,6 +120,7 @@ public:
                 #endif
             }
     }
+    return std::make_shared<CPUEvent>();
 }
 };
 
