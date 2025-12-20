@@ -53,13 +53,17 @@ namespace lumen {
 
     // --- Runtime Implementation ---
     Runtime::Runtime() {
-        router_ = std::make_unique<Router>();
         backends_["cpu"] = create_cpu_backend();
         #ifdef LUMEN_USE_METAL
             backends_["metal"] = create_metal_backend();
         #endif
         #ifdef LUMEN_USE_CUDA
-            try { backends_["cuda"] = create_cuda_backend(); } catch(...) {}
+            try { 
+                backends_["cuda"] = create_cuda_backend(); 
+            } catch(const std::exception& e) {
+                // Now reports why CUDA isn't loading
+                std::cerr << "[Lumen] CUDA Initialization Failed: " << e.what() << std::endl;
+            }
         #endif
 
         run_startup_benchmarks();
@@ -114,6 +118,7 @@ namespace lumen {
         std::vector<std::shared_ptr<Event>> new_events;
         size_t i = 0;
         while (i < current_queue.size()) {
+            // FIXED: 'target' and 'group' are now correctly declared within the loop scope
             std::string target = current_queue[i].target_backend;
             std::vector<QueuedOp> group;
             
