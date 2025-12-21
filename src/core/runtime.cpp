@@ -85,7 +85,15 @@ void Runtime::run_startup_benchmarks() {
     startup_op.target_backend = name;
     std::vector<QueuedOp> startup_queue = {startup_op};
     auto ev = backend->sync(startup_queue);
-    
+
+    QueuedOp add_op;
+    add_op.op_name = "add";
+    add_op.inputs = {tA, tB};
+    add_op.output = tC;
+    add_op.target_backend = name;
+    std::vector<QueuedOp> add_queue = {add_op};
+    backend->sync(add_queue);
+
     if (ev)
     ev->wait();
   

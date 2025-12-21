@@ -129,6 +129,11 @@ public:
                const std::vector<size_t> &new_strides, size_t new_offset = 0);
   void set_location(BufferLocation loc) { location_ = loc; }
   BufferLocation location() const { return location_; }
+  void *device_handle_base() const { return device_ptr_; }
+
+  size_t offset() const { return offset_; }
+  size_t offset_bytes() const { return offset_ * sizeof(float); }
+  void *device_ptr() const { return device_ptr_; }
 
 private:
   std::vector<size_t> shape_;

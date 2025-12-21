@@ -261,14 +261,23 @@ private:
     return ss.str();
   }
 
+  // Change this method to correctly handle offsets
+  // lumen/src/backends/gpu/metal_backend.mm
+
+  // lumen/src/backends/gpu/metal_backend.mm
+
   MPSGraphTensorData *create_tensor_data(Buffer *buf) {
     NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
     for (auto d : buf->shape())
       [ns_shape addObject:@(d)];
-    return [[MPSGraphTensorData alloc]
-        initWithMTLBuffer:(__bridge id<MTLBuffer>)buf->device_handle()
-                    shape:ns_shape
-                 dataType:MPSDataTypeFloat32];
+
+    // FIXED: Correctly cast the device_ptr back to an id<MTLBuffer> object
+    // without performing arithmetic on the object's memory address.
+    id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)buf->device_handle_base();
+
+    return [[MPSGraphTensorData alloc] initWithMTLBuffer:mtl_buf
+                                                   shape:ns_shape
+                                                dataType:MPSDataTypeFloat32];
   }
 };
 

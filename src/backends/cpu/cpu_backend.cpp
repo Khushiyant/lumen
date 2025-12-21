@@ -1,7 +1,9 @@
 #include "lumen/lumen.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <sstream> // Added for debugging
 #include <vector>
 
 #ifdef __APPLE__
@@ -82,13 +84,18 @@ public:
       // 2. Execute each sub-operation in the chain
       for (size_t i = 0; i < sub_ops.size(); ++i) {
         const std::string &current_op = sub_ops[i];
-
+        
         // The first op uses the original inputs; subsequent ops use the output
         // buffer as input
         std::vector<Buffer *> effective_inputs =
-            (i == 0) ? op.inputs : std::vector<Buffer *>{op.output};
+        (i == 0) ? op.inputs : std::vector<Buffer *>{op.output};
         float *out = (float *)op.output->data();
         size_t n = op.output->num_elements();
+
+        // DIAGNOSTIC PRINT
+        std::cout << "[CPU Debug] Executing: " << current_op << " for " << n
+                  << " elements." << std::endl;
+  
 
         if (current_op == "matmul") {
           float *A = (float *)effective_inputs[0]->data();
