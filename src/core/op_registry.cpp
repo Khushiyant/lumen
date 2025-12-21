@@ -12,6 +12,32 @@
 
 namespace lumen {
 
+// Helper function to compute broadcasted index
+
+inline size_t get_broadcast_index(size_t linear_idx,
+                                  const std::vector<size_t> &out_shape,
+                                  const std::vector<size_t> &in_shape) {
+  size_t in_idx = 0;
+  size_t stride = 1;
+  size_t out_stride = 1;
+
+  // We iterate backwards through dimensions
+  for (int i = out_shape.size() - 1; i >= 0; --i) {
+    size_t out_dim = out_shape[i];
+    size_t in_dim = (i >= (out_shape.size() - in_shape.size()))
+                        ? in_shape[i - (out_shape.size() - in_shape.size())]
+                        : 1;
+
+    size_t pos = (linear_idx / out_stride) % out_dim;
+    if (in_dim > 1) {
+      in_idx += pos * stride;
+      stride *= in_dim;
+    }
+    out_stride *= out_dim;
+  }
+  return in_idx;
+}
+
 // ============================================================================
 // OPCONTEXT HELPERS
 // ============================================================================
@@ -85,10 +111,22 @@ void add_cpu(const OpContext &ctx) {
   float *a = ctx.input_ptr(0);
   float *b = ctx.input_ptr(1);
   float *out = ctx.output_ptr();
-  size_t n = ctx.output_size();
 
-  for (size_t i = 0; i < n; ++i) {
-    out[i] = a[i] + b[i];
+  const auto &a_s = ctx.inputs[0]->shape();
+  const auto &b_s = ctx.inputs[1]->shape();
+  const auto &out_s = ctx.output->shape();
+
+  // If shapes match exactly, use fast path
+  if (a_s == b_s) {
+    for (size_t i = 0; i < ctx.output_size(); ++i)
+      out[i] = a[i] + b[i];
+  } else {
+    // Broadpath path
+    for (size_t i = 0; i < ctx.output_size(); ++i) {
+      size_t a_idx = get_broadcast_index(i, out_s, a_s);
+      size_t b_idx = get_broadcast_index(i, out_s, b_s);
+      out[i] = a[a_idx] + b[b_idx];
+    }
   }
 }
 

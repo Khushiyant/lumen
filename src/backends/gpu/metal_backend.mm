@@ -54,6 +54,14 @@ public:
     }
   }
 
+  void copy_h2d(void *host_ptr, void *device_ptr, size_t size) override {
+    std::memcpy(device_ptr, host_ptr, size);
+  }
+
+  void copy_d2h(void *device_ptr, void *host_ptr, size_t size) override {
+    std::memcpy(host_ptr, device_ptr, size);
+  }
+
   Buffer *create_buffer(const std::vector<size_t> &shape) override {
     size_t total_elements = 1;
     for (auto d : shape)
@@ -85,8 +93,8 @@ public:
   void execute(const std::string &op_name,
                const std::vector<std::shared_ptr<Buffer>> &inputs,
                std::shared_ptr<Buffer> output) override {
-    std::vector<QueuedOp> single_op_queue = {{op_name, inputs, output}};
-    this->sync(single_op_queue);
+    std::vector<QueuedOp> q = {{op_name, inputs, output, {}, ""}};
+    sync(q);
   }
 
   std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) override {

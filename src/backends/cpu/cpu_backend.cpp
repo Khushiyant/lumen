@@ -46,6 +46,14 @@ public:
     return new Buffer(shape, strides, ptr, ptr, this, 0);
   }
 
+  void copy_h2d(void *host_ptr, void *device_ptr, size_t size) override {
+    std::memcpy(device_ptr, host_ptr, size);
+  }
+
+  void copy_d2h(void *device_ptr, void *host_ptr, size_t size) override {
+    std::memcpy(host_ptr, device_ptr, size);
+  }
+
   void free_buffer(void *device_ptr, size_t size) override {
     if (device_ptr)
       pool_.release(device_ptr, size);

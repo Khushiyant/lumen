@@ -316,6 +316,11 @@ ExecutableGraph::ExecutableGraph(Runtime *rt, const Graph *graph)
     : runtime_(rt), total_memory_bytes_(0) {
   allocate_buffers(graph);
   load_weights(graph);
+  size_t total_weight_bytes = 0;
+  for (const auto &[name, desc] : graph->weights()) {
+    total_weight_bytes += desc->size_bytes();
+  }
+  total_memory_bytes_ += total_weight_bytes;
   build_execution_plan(graph);
   std::cout << "[ExecutableGraph] Compilation complete. Memory: "
             << (total_memory_bytes_ / 1024.0 / 1024.0) << " MB" << std::endl;
@@ -325,12 +330,17 @@ ExecutableGraph::~ExecutableGraph() {
   intermediate_buffers_.clear();
   weight_buffers_.clear();
 }
+// lumen/src/core/graph.cpp
+
 void ExecutableGraph::allocate_buffers(const Graph *graph) {
   std::map<std::string, TensorLiveness> liveness_map;
   analyze_liveness(graph, liveness_map);
 
   std::multimap<size_t, std::shared_ptr<Buffer>> free_pool;
   std::map<std::string, std::shared_ptr<Buffer>> assignments;
+
+  size_t current_footprint = 0; // Track actual bytes in use
+  total_memory_bytes_ = 0;      // Track peak usage (High Water Mark)
 
   const auto &nodes = graph->nodes();
   for (size_t i = 0; i < nodes.size(); ++i) {
@@ -345,17 +355,24 @@ void ExecutableGraph::allocate_buffers(const Graph *graph) {
       free_pool.erase(it);
     } else {
       buf = runtime_->alloc(nodes[i]->output()->shape());
-      total_memory_bytes_ += liveness.size_bytes;
     }
+
+    current_footprint += liveness.size_bytes; // Add to footprint for both new and reused buffers
+
+    if (current_footprint > total_memory_bytes_)
+      total_memory_bytes_ = current_footprint;
 
     assignments[out_name] = buf;
     intermediate_buffers_[out_name] = buf;
 
+    // Release buffers that have reached their last use
     for (auto *input : nodes[i]->inputs()) {
       std::string in_name = input->name();
       if (liveness_map.count(in_name) && liveness_map[in_name].last_use == i) {
         free_pool.insert(
             {liveness_map[in_name].size_bytes, assignments[in_name]});
+        // Footprint decreases when a buffer is added back to the pool
+        current_footprint -= liveness_map[in_name].size_bytes;
       }
     }
   }

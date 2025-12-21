@@ -114,6 +114,9 @@ public:
 
   virtual std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) = 0;
 
+  virtual void copy_h2d(void *host_ptr, void *device_ptr, size_t size) = 0;
+  virtual void copy_d2h(void *device_ptr, void *host_ptr, size_t size) = 0;
+
 protected:
   MemoryPool pool_;
 };
@@ -144,6 +147,17 @@ public:
   // Synchronization tracking
   void set_last_event(std::shared_ptr<Event> ev) { last_write_event_ = ev; }
   std::shared_ptr<Event> get_last_event() const { return last_write_event_; }
+
+  // Synchronize data to host
+  void sync_to_host() {
+    if (location_ == BufferLocation::DEVICE_ONLY) {
+      if (last_write_event_)
+        last_write_event_->wait();
+      creator_->copy_d2h(device_ptr_, host_ptr_, size_bytes());
+      location_ = BufferLocation::BOTH_SYNCED;
+    }
+  }
+
 
 private:
   std::vector<size_t> shape_;
