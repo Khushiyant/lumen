@@ -91,8 +91,8 @@ struct OpAttributes {
 
 struct QueuedOp {
   std::string op_name;
-  std::vector<Buffer *> inputs;
-  Buffer *output;
+  std::vector<std::shared_ptr<Buffer>> inputs; 
+  std::shared_ptr<Buffer> output;
   OpAttributes attrs;
   std::string target_backend;
 };
@@ -109,7 +109,8 @@ public:
   virtual void free_buffer(void *device_ptr, size_t size) = 0;
 
   virtual void execute(const std::string &op_name,
-                       const std::vector<Buffer *> &inputs, Buffer *output) = 0;
+                       const std::vector<std::shared_ptr<Buffer>> &inputs,
+                       std::shared_ptr<Buffer> output) = 0;
 
   virtual std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) = 0;
 
@@ -172,10 +173,11 @@ class Runtime {
 public:
   Runtime();
   ~Runtime();
-  Buffer *alloc(const std::vector<size_t> &shape);
+  std::shared_ptr<Buffer> alloc(const std::vector<size_t> &shape);
 
-  void execute(const std::string &op_name, const std::vector<Buffer *> &inputs,
-               Buffer *output, const OpAttributes &attrs = {});
+  void execute(const std::string &op_name,
+               const std::vector<std::shared_ptr<Buffer>> &inputs,
+               std::shared_ptr<Buffer> output);
 
   std::vector<std::shared_ptr<Event>> submit();
   void wait_all();

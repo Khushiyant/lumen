@@ -133,13 +133,13 @@ void tanh_cpu(const OpContext &ctx) {
   }
 }
 
-void ops::flatten_cpu(const OpContext &ctx) {
+void flatten_cpu(const OpContext &ctx) {
   float *in = ctx.input_ptr(0);
   float *out = ctx.output_ptr();
   std::copy(in, in + ctx.output_size(), out);
 }
 
-void ops::reshape_cpu(const OpContext &ctx) {
+void reshape_cpu(const OpContext &ctx) {
   float *in = ctx.input_ptr(0);
   float *out = ctx.output_ptr();
   std::copy(in, in + ctx.output_size(), out);

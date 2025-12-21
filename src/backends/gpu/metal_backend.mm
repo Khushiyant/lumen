@@ -82,8 +82,9 @@ public:
       pool_.release(device_ptr, size);
   }
 
-  void execute(const std::string &op_name, const std::vector<Buffer *> &inputs,
-               Buffer *output) override {
+  void execute(const std::string &op_name,
+               const std::vector<std::shared_ptr<Buffer>> &inputs,
+               std::shared_ptr<Buffer> output) override {
     std::vector<QueuedOp> single_op_queue = {{op_name, inputs, output}};
     this->sync(single_op_queue);
   }
@@ -115,7 +116,8 @@ public:
             NSMutableArray<MPSGraphTensor *> *ins = [NSMutableArray array];
 
             if (i == 0) {
-              for (Buffer *buf : op.inputs) {
+              for (const auto &buf_ptr : op.inputs) {
+                Buffer *buf = buf_ptr.get();
                 if (buffer_to_tensor.count(buf)) {
                   [ins addObject:buffer_to_tensor[buf]];
                 } else {
@@ -156,12 +158,12 @@ public:
             } else if (sub_op == "softmax") {
               current_res = [graph softMaxWithTensor:ins[0] axis:-1 name:nil];
             } else if (sub_op == "flatten") {
-              current_res = [graph
-                  reshapeTensor:ins[0]
-                      withShape:@[
-                        @(op.output->shape()[0]), @(op.output->shape()[1])
-                      ]
-                           name:nil];
+              current_res = [graph reshapeTensor:ins[0]
+                                       withShape:@[
+                                         @(op.output.get()->shape()[0]),
+                                         @(op.output.get()->shape()[1])
+                                       ]
+                                            name:nil];
             } else if (sub_op == "reshape") {
               auto shape_ints = op.attrs.get_int_array("shape");
               NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
@@ -305,7 +307,7 @@ public:
             }
           }
           if (current_res) {
-            buffer_to_tensor[op.output] = current_res;
+            buffer_to_tensor[op.output.get()] = current_res;
             [targetTensors addObject:current_res];
           }
         }
@@ -333,7 +335,8 @@ public:
           [NSMutableArray array];
       std::map<Buffer *, MPSGraphTensorData *> data_map;
 
-      auto create_data_safe = [&](Buffer *buf) -> MPSGraphTensorData * {
+      auto create_data_safe =
+          [&](const std::shared_ptr<Buffer> &buf) -> MPSGraphTensorData * {
         id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)buf->device_ptr();
         NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
         for (auto d : buf->shape())
@@ -349,19 +352,20 @@ public:
       };
 
       for (const auto &op : queue) {
-        for (Buffer *buf : op.inputs) {
-          if (!data_map.count(buf))
-            data_map[buf] = create_data_safe(buf);
+        for (const auto &buf_sh : op.inputs) {
+          // Buffer *buf = buf_sh.get(); 
+          if (!data_map.count(buf_sh.get()))
+            data_map[buf_sh.get()] = create_data_safe(buf_sh);
         }
         [resultsArray addObject:create_data_safe(op.output)];
       }
 
       std::set<Buffer *> seen;
       for (const auto &op : queue) {
-        for (Buffer *buf : op.inputs) {
-          if (seen.find(buf) == seen.end()) {
-            [inputsArray addObject:data_map[buf]];
-            seen.insert(buf);
+        for (const auto &buf_sh : op.inputs) {
+          if (seen.find(buf_sh.get()) == seen.end()) {
+            [inputsArray addObject:data_map[buf_sh.get()]];
+            seen.insert(buf_sh.get());
           }
         }
       }
@@ -400,7 +404,7 @@ private:
         ss << "|";
       }
       ss << ")->";
-      for (auto d : op.output->shape())
+      for (auto d : op.output.get()->shape())
         ss << d << ",";
       ss << " ";
     }

@@ -51,9 +51,12 @@ public:
       pool_.release(device_ptr, size);
   }
 
-  void execute(const std::string &op_name, const std::vector<Buffer *> &inputs,
-               Buffer *output) override {
-    std::vector<QueuedOp> q = {{op_name, inputs, output}};
+  void execute(const std::string &op_name,
+               const std::vector<std::shared_ptr<Buffer>> &inputs,
+               std::shared_ptr<Buffer> output)
+      override { 
+    std::vector<QueuedOp> q = {
+        {op_name, inputs, output, {}, ""}}; 
     sync(q);
   }
 
@@ -75,17 +78,16 @@ public:
 
       for (size_t i = 0; i < sub_ops.size(); ++i) {
         OpContext ctx;
-        ctx.inputs = (i == 0) ? op.inputs : std::vector<Buffer *>{op.output};
-        ctx.output = op.output;
+        if (i == 0) {
+          for (auto &in_sh : op.inputs)
+            ctx.inputs.push_back(in_sh.get());
+        } else {
+          ctx.inputs = {op.output.get()};
+        }
+        ctx.output = op.output.get();
         ctx.attrs = op.attrs;
 
-        try {
-          execute_op(sub_ops[i], ctx);
-        } catch (const std::exception &e) {
-          std::cerr << "[CPU] Op '" << sub_ops[i] << "' failed: " << e.what()
-                    << std::endl;
-          throw;
-        }
+        execute_op(sub_ops[i], ctx);
       }
     }
     return std::make_shared<CPUEvent>();

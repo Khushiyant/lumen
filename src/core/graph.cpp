@@ -322,40 +322,34 @@ ExecutableGraph::ExecutableGraph(Runtime *rt, const Graph *graph)
 }
 
 ExecutableGraph::~ExecutableGraph() {
-  std::set<Buffer *> unique_buffers;
-  for (auto const &[name, buf] : intermediate_buffers_)
-    if (buf)
-      unique_buffers.insert(buf);
-  for (auto const &[name, buf] : weight_buffers_)
-    if (buf)
-      unique_buffers.insert(buf);
-  for (Buffer *buf : unique_buffers)
-    delete buf;
   intermediate_buffers_.clear();
   weight_buffers_.clear();
 }
-
 void ExecutableGraph::allocate_buffers(const Graph *graph) {
   std::map<std::string, TensorLiveness> liveness_map;
   analyze_liveness(graph, liveness_map);
-  std::multimap<size_t, Buffer *> free_pool;
-  std::map<std::string, Buffer *> assignments;
+
+  std::multimap<size_t, std::shared_ptr<Buffer>> free_pool;
+  std::map<std::string, std::shared_ptr<Buffer>> assignments;
 
   const auto &nodes = graph->nodes();
   for (size_t i = 0; i < nodes.size(); ++i) {
     std::string out_name = nodes[i]->output()->name();
     auto &liveness = liveness_map[out_name];
-    Buffer *reused_buf = nullptr;
+
+    std::shared_ptr<Buffer> buf;
     auto it = free_pool.lower_bound(liveness.size_bytes);
+
     if (it != free_pool.end() && it->first < liveness.size_bytes * 2) {
-      reused_buf = it->second;
+      buf = it->second;
       free_pool.erase(it);
     } else {
-      reused_buf = runtime_->alloc(nodes[i]->output()->shape());
-      total_memory_bytes_ += liveness.size_bytes;
+      buf = runtime_->alloc(nodes[i]->output()->shape());
     }
-    assignments[out_name] = reused_buf;
-    intermediate_buffers_[out_name] = reused_buf;
+
+    assignments[out_name] = buf;
+    intermediate_buffers_[out_name] = buf;
+
     for (auto *input : nodes[i]->inputs()) {
       std::string in_name = input->name();
       if (liveness_map.count(in_name) && liveness_map[in_name].last_use == i) {
@@ -387,20 +381,22 @@ void ExecutableGraph::analyze_liveness(
 
 void ExecutableGraph::load_weights(const Graph *graph) {
   for (const auto &[name, desc] : graph->weights()) {
-    auto *buf = runtime_->alloc(desc->shape());
+    // runtime_->alloc returns shared_ptr
+    auto buf = runtime_->alloc(desc->shape());
     weight_buffers_[name] = buf;
-    total_memory_bytes_ += desc->size_bytes();
+
+    // Use buf.get() to access raw data for memcpy
     const auto &all_weight_data = graph->weight_data();
     if (all_weight_data.count(name)) {
-      const auto &data = all_weight_data.at(name);
-      std::memcpy(buf->data(), data.data(), data.size() * sizeof(float));
+      std::memcpy(buf->data(), all_weight_data.at(name).data(),
+                  desc->size_bytes());
     }
   }
 }
 
 void ExecutableGraph::build_execution_plan(const Graph *graph) {
   for (const auto &node : graph->nodes()) {
-    std::vector<Buffer *> input_buffers;
+    std::vector<std::shared_ptr<Buffer>> input_buffers;
     for (auto *input_desc : node->inputs()) {
       std::string name = input_desc->name();
       if (weight_buffers_.count(name))
@@ -410,28 +406,25 @@ void ExecutableGraph::build_execution_plan(const Graph *graph) {
       else
         input_buffers.push_back(nullptr);
     }
-    Buffer *output_buffer = intermediate_buffers_[node->output()->name()];
+
     QueuedOpWithAttrs op;
     op.op_name = node->op_type();
     op.inputs = input_buffers;
-    op.output = output_buffer;
+    op.output = intermediate_buffers_[node->output()->name()];
     op.attrs = node->attrs();
-    op.target_backend = "";
     execution_plan_.push_back(op);
   }
 }
 
-std::vector<Buffer *>
-ExecutableGraph::execute(const std::vector<Buffer *> &inputs) {
+std::vector<std::shared_ptr<Buffer>>
+ExecutableGraph::execute(const std::vector<std::shared_ptr<Buffer>> &inputs) {
   size_t input_idx = 0;
   for (auto &op : execution_plan_) {
-    std::vector<Buffer *> runtime_inputs = op.inputs;
+    std::vector<std::shared_ptr<Buffer>> runtime_inputs = op.inputs;
     for (size_t i = 0; i < runtime_inputs.size(); ++i) {
       if (runtime_inputs[i] == nullptr) {
         if (input_idx < inputs.size())
           runtime_inputs[i] = inputs[input_idx++];
-        else
-          throw GraphException("Not enough input buffers provided.");
       }
     }
     runtime_->execute(op.op_name, runtime_inputs, op.output, op.attrs);

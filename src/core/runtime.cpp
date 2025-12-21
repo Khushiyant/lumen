@@ -78,9 +78,9 @@ void Runtime::run_startup_benchmarks() {
   for (auto &[name, backend] : backends_) {
     size_t dim = 256;
     auto start = std::chrono::high_resolution_clock::now();
-    auto *tA = backend->create_buffer({dim, dim});
-    auto *tB = backend->create_buffer({dim, dim});
-    auto *tC = backend->create_buffer({dim, dim});
+    auto tA = std::shared_ptr<Buffer>(backend->create_buffer({dim, dim}));
+    auto tB = std::shared_ptr<Buffer>(backend->create_buffer({dim, dim}));
+    auto tC = std::shared_ptr<Buffer>(backend->create_buffer({dim, dim}));
 
     QueuedOp startup_op;
     startup_op.op_name = "matmul";
@@ -97,9 +97,7 @@ void Runtime::run_startup_benchmarks() {
     double ms = std::chrono::duration<double, std::milli>(end - start).count();
 
     metrics_[name]["matmul"] = {ms, (double)(dim * dim * dim) / (ms * 1e3)};
-    delete tA;
-    delete tB;
-    delete tC;
+
   }
 }
 
@@ -113,7 +111,8 @@ size_t Buffer::num_elements() const {
 size_t Buffer::size_bytes() const { return num_elements() * sizeof(float); }
 
 void Runtime::execute(const std::string &op_name,
-                      const std::vector<Buffer *> &inputs, Buffer *output,
+                      const std::vector<std::shared_ptr<Buffer>> &inputs,
+                      std::shared_ptr<Buffer> output,
                       const OpAttributes &attrs) {
   Backend *target = active_backend_
                         ? active_backend_
@@ -130,10 +129,8 @@ void Runtime::execute(const std::string &op_name,
   // --- CROSS-BACKEND SYNCHRONIZATION ---
   // If any input is still being processed by a different backend (or has a
   // pending event), we must wait for it to ensure data consistency.
-  for (auto *in : inputs) {
+  for (const auto &in : inputs) {
     if (in->get_last_event()) {
-      // In a more complex system, we would insert a barrier.
-      // For now, we wait on the host to ensure safety.
       if (!in->get_last_event()->is_completed()) {
         in->get_last_event()->wait();
       }
@@ -198,13 +195,23 @@ void Runtime::wait_all() {
   inflight_events_.clear();
 }
 
-Buffer *Runtime::alloc(const std::vector<size_t> &shape) {
+// lumen/src/core/runtime.cpp
+
+std::shared_ptr<Buffer> Runtime::alloc(const std::vector<size_t> &shape) {
+  // Select the highest-performance backend available for allocation
   Backend *allocator = backends_.count("cuda") ? backends_["cuda"].get()
                                                : (backends_.count("metal")
                                                       ? backends_["metal"].get()
                                                       : backends_["cpu"].get());
 
-  Buffer *buf = allocator->create_buffer(shape);
+  // Create the raw buffer from the backend
+  Buffer *raw_buf = allocator->create_buffer(shape);
+
+  // Wrap it in a shared_ptr with a standard deleter
+  // The Buffer destructor will automatically handle
+  // creator_->free_buffer(device_ptr_)
+  auto buf = std::shared_ptr<Buffer>(raw_buf);
+
   buf->set_runtime(this);
   return buf;
 }

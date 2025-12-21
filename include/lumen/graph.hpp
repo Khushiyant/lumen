@@ -17,8 +17,8 @@ enum class DataType { FLOAT32, FLOAT16, INT8, INT32, INT64, BOOL };
 
 struct QueuedOpWithAttrs {
   std::string op_name;
-  std::vector<Buffer *> inputs;
-  Buffer *output;
+  std::vector<std::shared_ptr<Buffer>> inputs; // Changed
+  std::shared_ptr<Buffer> output;              // Changed
   OpAttributes attrs;
   std::string target_backend;
 };
@@ -226,9 +226,10 @@ public:
   ExecutableGraph(Runtime *rt, const Graph *graph);
   ~ExecutableGraph();
 
-  std::vector<Buffer *> execute(const std::vector<Buffer *> &inputs);
-  void execute(const std::vector<Buffer *> &inputs,
-               const std::vector<Buffer *> &outputs);
+  std::vector<std::shared_ptr<Buffer>>
+  execute(const std::vector<std::shared_ptr<Buffer>> &inputs);
+  void execute(const std::vector<std::shared_ptr<Buffer>> &inputs,
+               const std::vector<std::shared_ptr<Buffer>> &outputs);
   size_t get_memory_usage() const { return total_memory_bytes_; }
 
   struct ProfilingData {
@@ -242,9 +243,9 @@ public:
 private:
   Runtime *runtime_;
   std::vector<QueuedOpWithAttrs> execution_plan_;
-  std::map<std::string, Buffer *> intermediate_buffers_;
-  std::map<std::string, Buffer *> weight_buffers_;
-  std::vector<Buffer *> output_buffers_;
+  std::map<std::string, std::shared_ptr<Buffer>> intermediate_buffers_;
+  std::map<std::string, std::shared_ptr<Buffer>> weight_buffers_;
+  std::vector<std::shared_ptr<Buffer>> output_buffers_;
   size_t total_memory_bytes_;
 
   void analyze_liveness(const Graph *graph,
