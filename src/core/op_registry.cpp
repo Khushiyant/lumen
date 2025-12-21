@@ -4,6 +4,12 @@
 #include <cmath>
 #include <stdexcept>
 
+#if defined(__APPLE__)
+#include <Accelerate/Accelerate.h>
+#elif defined(LUMEN_USE_OPENBLAS)
+#include <cblas.h>
+#endif
+
 namespace lumen {
 
 // ============================================================================
@@ -127,6 +133,19 @@ void tanh_cpu(const OpContext &ctx) {
   }
 }
 
+void ops::flatten_cpu(const OpContext &ctx) {
+  float *in = ctx.input_ptr(0);
+  float *out = ctx.output_ptr();
+  std::copy(in, in + ctx.output_size(), out);
+}
+
+void ops::reshape_cpu(const OpContext &ctx) {
+  float *in = ctx.input_ptr(0);
+  float *out = ctx.output_ptr();
+  std::copy(in, in + ctx.output_size(), out);
+}
+
+
 void matmul_cpu(const OpContext &ctx) {
   float *A = ctx.input_ptr(0);
   float *B = ctx.input_ptr(1);
@@ -143,7 +162,6 @@ void matmul_cpu(const OpContext &ctx) {
   int N = trans_b ? shape_b[0] : shape_b[1];
 
 #if defined(__APPLE__) || defined(LUMEN_USE_OPENBLAS)
-#include <Accelerate/Accelerate.h>
   cblas_sgemm(CblasRowMajor, trans_a ? CblasTrans : CblasNoTrans,
               trans_b ? CblasTrans : CblasNoTrans, M, N, K, 1.0f, A,
               trans_a ? M : K, B, trans_b ? K : N, 0.0f, out, N);
@@ -487,6 +505,7 @@ void BackendWithRegistry::register_standard_ops() {
   registry_.register_op("layer_norm", ops::layer_norm_cpu);
   registry_.register_op("batchnorm", ops::batch_norm_cpu);
 
+
   // Pooling
   registry_.register_op("maxpool2d", ops::max_pool2d_cpu);
   registry_.register_op("avgpool2d", ops::avg_pool2d_cpu);
@@ -495,6 +514,10 @@ void BackendWithRegistry::register_standard_ops() {
   // Reductions
   registry_.register_op("reduce_mean", ops::reduce_mean_cpu);
   registry_.register_op("reduce_sum", ops::reduce_sum_cpu);
+
+  // Other ops
+  registry_.register_op("flatten", ops::flatten_cpu);
+  registry_.register_op("reshape", ops::reshape_cpu);
 }
 
 } // namespace lumen

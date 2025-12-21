@@ -6,7 +6,7 @@ void test_onnx_loading() {
   lumen::Runtime rt;
 
   // 1. Import from file
-  auto graph = lumen::ONNXImporter::import_model("models/mnist.onnx");
+  auto graph = lumen::ONNXImporter::import_model("./models/mnist.onnx");
 
   // 2. Run your existing optimization passes
   graph->optimize(); // Fuses ops, removes dead code

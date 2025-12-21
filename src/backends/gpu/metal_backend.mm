@@ -1,4 +1,5 @@
 #include "lumen/lumen.hpp"
+#include "lumen/op_registry.hpp"
 #import <Accelerate/Accelerate.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
@@ -28,7 +29,7 @@ struct CachedPipeline {
   NSMutableArray<MPSGraphTensor *> *orderedPlaceholders;
 };
 
-class MetalBackend : public Backend {
+class MetalBackend : public Backend, public BackendWithRegistry {
 public:
   MetalBackend() {
     device_ = MTLCreateSystemDefaultDevice();
@@ -38,18 +39,19 @@ public:
       return;
     }
     command_queue_ = [device_ newCommandQueue];
-    std::cout << "[Lumen] Metal Backend Initialized with Memory Pooling"
-              << std::endl;
+
+    register_standard_ops();
+    register_backend_ops();
+    std::cout << "[Lumen] Metal Backend Initialized - "
+              << supported_ops().size() << " ops" << std::endl;
   }
 
   virtual ~MetalBackend() {
     auto blocks = pool_.drain();
     for (auto &block : blocks) {
-      // Hands control back to Objective-C ARC to trigger deallocation
       id<MTLBuffer> buf = (__bridge_transfer id<MTLBuffer>)block.second;
       buf = nil;
     }
-    std::cout << "[Lumen] Metal Backend: Memory Pool Drained." << std::endl;
   }
 
   Buffer *create_buffer(const std::vector<size_t> &shape) override {
@@ -57,37 +59,27 @@ public:
     for (auto d : shape)
       total_elements *= d;
     size_t size = total_elements * sizeof(float);
-
-    // Try to acquire from the memory pool
     void *device_ptr = pool_.acquire(size);
     id<MTLBuffer> buf = nil;
-
     if (device_ptr) {
-      // Re-cast the void* back to an Objective-C object
       buf = (__bridge id<MTLBuffer>)device_ptr;
     } else {
       buf = [device_ newBufferWithLength:size
                                  options:MTLResourceStorageModeShared];
-      // Bridge Retain: Increments ref count so ARC doesn't dealloc it
       device_ptr = (__bridge_retained void *)buf;
     }
-
     std::vector<size_t> strides(shape.size());
     size_t s = 1;
     for (int i = (int)shape.size() - 1; i >= 0; --i) {
       strides[i] = s;
       s *= shape[i];
     }
-
-    // Host ptr is contents because storage mode is Shared
     return new Buffer(shape, strides, device_ptr, [buf contents], this, 0);
   }
 
   void free_buffer(void *device_ptr, size_t size) override {
-    if (device_ptr) {
-      // Return it to the pool (still retained).
+    if (device_ptr)
       pool_.release(device_ptr, size);
-    }
   }
 
   void execute(const std::string &op_name, const std::vector<Buffer *> &inputs,
@@ -124,9 +116,9 @@ public:
 
             if (i == 0) {
               for (Buffer *buf : op.inputs) {
-                if (buffer_to_tensor.count(buf))
+                if (buffer_to_tensor.count(buf)) {
                   [ins addObject:buffer_to_tensor[buf]];
-                else {
+                } else {
                   NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
                   for (auto d : buf->shape())
                     [ns_shape addObject:@(d)];
@@ -143,23 +135,67 @@ public:
               [ins addObject:current_res];
             }
 
-            if (sub_op == "add")
+            if (sub_op == "add") {
               current_res = [graph additionWithPrimaryTensor:ins[0]
                                              secondaryTensor:ins[1]
                                                         name:nil];
-            else if (sub_op == "mul")
+            } else if (sub_op == "mul") {
               current_res = [graph multiplicationWithPrimaryTensor:ins[0]
                                                    secondaryTensor:ins[1]
                                                               name:nil];
-            else if (sub_op == "matmul")
+            } else if (sub_op == "matmul") {
               current_res = [graph matrixMultiplicationWithPrimaryTensor:ins[0]
                                                          secondaryTensor:ins[1]
                                                                     name:nil];
-            else if (sub_op == "relu")
+            } else if (sub_op == "relu") {
               current_res = [graph reLUWithTensor:ins[0] name:nil];
-            else if (sub_op == "softmax")
+            } else if (sub_op == "sigmoid") {
+              current_res = [graph sigmoidWithTensor:ins[0] name:nil];
+            } else if (sub_op == "tanh") {
+              current_res = [graph tanhWithTensor:ins[0] name:nil];
+            } else if (sub_op == "softmax") {
               current_res = [graph softMaxWithTensor:ins[0] axis:-1 name:nil];
-            else if (sub_op == "conv2d") {
+            } else if (sub_op == "flatten") {
+              current_res = [graph
+                  reshapeTensor:ins[0]
+                      withShape:@[
+                        @(op.output->shape()[0]), @(op.output->shape()[1])
+                      ]
+                           name:nil];
+            } else if (sub_op == "reshape") {
+              auto shape_ints = op.attrs.get_int_array("shape");
+              NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
+              for (auto d : shape_ints)
+                [ns_shape addObject:@(d)];
+              current_res = [graph reshapeTensor:ins[0]
+                                       withShape:ns_shape
+                                            name:nil];
+            } else if (sub_op == "layer_norm") {
+              MPSGraphTensor *mean = [graph meanOfTensor:ins[0]
+                                                    axes:@[ @(-1) ]
+                                                    name:nil];
+              MPSGraphTensor *centered =
+                  [graph subtractionWithPrimaryTensor:ins[0]
+                                      secondaryTensor:mean
+                                                 name:nil];
+              MPSGraphTensor *squared = [graph squareWithTensor:centered
+                                                           name:nil];
+              MPSGraphTensor *variance = [graph meanOfTensor:squared
+                                                        axes:@[ @(-1) ]
+                                                        name:nil];
+              float eps = op.attrs.get_float("epsilon", 1e-5f);
+              MPSGraphTensor *eps_tensor =
+                  [graph constantWithScalar:eps dataType:MPSDataTypeFloat32];
+              MPSGraphTensor *variance_plus_eps =
+                  [graph additionWithPrimaryTensor:variance
+                                   secondaryTensor:eps_tensor
+                                              name:nil];
+              MPSGraphTensor *std_dev =
+                  [graph squareRootWithTensor:variance_plus_eps name:nil];
+              current_res = [graph divisionWithPrimaryTensor:centered
+                                             secondaryTensor:std_dev
+                                                        name:nil];
+            } else if (sub_op == "conv2d") {
               auto strides = op.attrs.get_int_array("stride");
               auto padding = op.attrs.get_int_array("padding");
               MPSGraphConvolution2DOpDescriptor *desc =
@@ -194,6 +230,78 @@ public:
               current_res = [graph meanOfTensor:ins[0]
                                            axes:@[ @2, @3 ]
                                            name:nil];
+            } else if (sub_op == "maxpool2d") {
+              auto kernel = op.attrs.get_int_array("kernel_size");
+              auto strides = op.attrs.get_int_array("stride");
+              int kh = kernel.empty() ? 2 : kernel[0];
+              int kw = kernel.size() > 1 ? kernel[1] : kh;
+              int sh = strides.empty() ? kh : strides[0];
+              int sw = strides.size() > 1 ? strides[1] : sh;
+              MPSGraphPooling2DOpDescriptor *desc =
+                  [MPSGraphPooling2DOpDescriptor
+                      descriptorWithKernelWidth:kw
+                                   kernelHeight:kh
+                                      strideInX:sw
+                                      strideInY:sh
+                                   paddingStyle:MPSGraphPaddingStyleExplicit
+                                     dataLayout:
+                                         MPSGraphTensorNamedDataLayoutNCHW];
+              current_res = [graph maxPooling2DWithSourceTensor:ins[0]
+                                                     descriptor:desc
+                                                           name:nil];
+            } else if (sub_op == "avgpool2d") {
+              auto kernel = op.attrs.get_int_array("kernel_size");
+              auto strides = op.attrs.get_int_array("stride");
+              int kh = kernel.empty() ? 2 : kernel[0];
+              int kw = kernel.size() > 1 ? kernel[1] : kh;
+              int sh = strides.empty() ? kh : strides[0];
+              int sw = strides.size() > 1 ? strides[1] : sh;
+              MPSGraphPooling2DOpDescriptor *desc =
+                  [MPSGraphPooling2DOpDescriptor
+                      descriptorWithKernelWidth:kw
+                                   kernelHeight:kh
+                                      strideInX:sw
+                                      strideInY:sh
+                                   paddingStyle:MPSGraphPaddingStyleExplicit
+                                     dataLayout:
+                                         MPSGraphTensorNamedDataLayoutNCHW];
+              current_res = [graph avgPooling2DWithSourceTensor:ins[0]
+                                                     descriptor:desc
+                                                           name:nil];
+            } else if (sub_op == "reduce_mean") {
+              current_res = [graph meanOfTensor:ins[0]
+                                           axes:@[ @(-1) ]
+                                           name:nil];
+            } else if (sub_op == "reduce_sum") {
+              current_res = [graph reductionSumWithTensor:ins[0]
+                                                     axes:@[ @(-1) ]
+                                                     name:nil];
+            } else if (sub_op == "batchnorm") {
+              // Simplified batch norm
+              MPSGraphTensor *mean = [graph meanOfTensor:ins[0]
+                                                    axes:@[ @0, @2, @3 ]
+                                                    name:nil];
+              MPSGraphTensor *centered =
+                  [graph subtractionWithPrimaryTensor:ins[0]
+                                      secondaryTensor:mean
+                                                 name:nil];
+              MPSGraphTensor *squared = [graph squareWithTensor:centered
+                                                           name:nil];
+              MPSGraphTensor *variance = [graph meanOfTensor:squared
+                                                        axes:@[ @0, @2, @3 ]
+                                                        name:nil];
+              float eps = op.attrs.get_float("epsilon", 1e-5f);
+              MPSGraphTensor *eps_tensor =
+                  [graph constantWithScalar:eps dataType:MPSDataTypeFloat32];
+              MPSGraphTensor *variance_plus_eps =
+                  [graph additionWithPrimaryTensor:variance
+                                   secondaryTensor:eps_tensor
+                                              name:nil];
+              MPSGraphTensor *std_dev =
+                  [graph squareRootWithTensor:variance_plus_eps name:nil];
+              current_res = [graph divisionWithPrimaryTensor:centered
+                                             secondaryTensor:std_dev
+                                                        name:nil];
             }
           }
           if (current_res) {
@@ -225,32 +333,18 @@ public:
           [NSMutableArray array];
       std::map<Buffer *, MPSGraphTensorData *> data_map;
 
-      // Helper to create tensor data, handling offsets safely
-      // Optimized version in lumen/src/backends/gpu/metal_backend.mm
-      // Correct zero-copy implementation in
-      // lumen/src/backends/gpu/metal_backend.mm
       auto create_data_safe = [&](Buffer *buf) -> MPSGraphTensorData * {
         id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)buf->device_ptr();
-
         NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
-        for (auto d : buf->shape()) {
+        for (auto d : buf->shape())
           [ns_shape addObject:@(d)];
-        }
-
-        // 1. Create a descriptor for the multidimensional array
         MPSNDArrayDescriptor *desc =
             [MPSNDArrayDescriptor descriptorWithDataType:MPSDataTypeFloat32
                                                    shape:ns_shape];
-
-        // 2. Initialize an MPSNDArray using the buffer and the byte offset.
-        // This provides a zero-copy "view" into the existing VRAM.
         MPSNDArray *ndarray =
             [[MPSNDArray alloc] initWithBuffer:mtl_buf
                                         offset:buf->offset_bytes()
                                     descriptor:desc];
-
-        // 3. Return the Graph-compatible TensorData initialized from the
-        // NDArray
         return [[MPSGraphTensorData alloc] initWithMPSNDArray:ndarray];
       };
 
@@ -282,6 +376,13 @@ public:
 
       return std::make_shared<MetalEvent>(commandBuffer);
     }
+  }
+
+protected:
+  void register_backend_ops() override {
+    // Metal uses MPSGraph for all operations, so the default graph-building
+    // in sync() handles everything. No need to override individual ops.
+    // All 15 operations are supported through the graph compilation.
   }
 
 private:

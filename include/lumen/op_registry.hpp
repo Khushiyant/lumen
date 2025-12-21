@@ -1,5 +1,6 @@
 #pragma once
 #include <functional>
+#include <lumen/lumen.hpp>
 #include <map>
 #include <memory>
 #include <string>
@@ -99,6 +100,9 @@ void global_avg_pool_cpu(const OpContext &ctx);
 // Reduction operations
 void reduce_mean_cpu(const OpContext &ctx);
 void reduce_sum_cpu(const OpContext &ctx);
+
+void flatten_cpu(const OpContext &ctx);
+void reshape_cpu(const OpContext &ctx);
 
 } // namespace ops
 

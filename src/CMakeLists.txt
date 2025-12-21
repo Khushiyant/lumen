@@ -11,6 +11,7 @@ set(LUMEN_SOURCES
     core/runtime.cpp
     core/router.cpp
     core/graph.cpp
+    core/op_registry.cpp
     core/onnx_importer.cpp
     backends/cpu/cpu_backend.cpp
 )

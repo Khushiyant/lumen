@@ -6,7 +6,7 @@ import os
 def main():
     # create models dir in current directory
     os.makedirs("models", exist_ok=True)
-    output_path = "models/mnist.onnx"
+    output_path = "./models/mnist.onnx"
 
     print(f"Generating {output_path} using native ONNX...")
 

@@ -1,14 +1,13 @@
 #include "lumen/lumen.hpp"
+#include "lumen/op_registry.hpp"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
-#include <string>
 
 namespace lumen {
 
-// --- CUDA Kernels ---
 __global__ void add_kernel(const float *a, const float *b, float *c, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n)
@@ -21,26 +20,63 @@ __global__ void mul_kernel(const float *a, const float *b, float *c, int n) {
     c[i] = a[i] * b[i];
 }
 
+__global__ void relu_kernel(const float *input, float *output, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n)
+    output[i] = fmaxf(0.0f, input[i]);
+}
+
+__global__ void sigmoid_kernel(const float *input, float *output, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n)
+    output[i] = 1.0f / (1.0f + expf(-input[i]));
+}
+
+__global__ void tanh_kernel(const float *input, float *output, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n)
+    output[i] = tanhf(input[i]);
+}
+
 __global__ void softmax_kernel(const float *input, float *output,
                                int outer_size, int inner_size) {
   int row = blockIdx.x * blockDim.x + threadIdx.x;
   if (row < outer_size) {
     const float *in_row = input + (row * inner_size);
     float *out_row = output + (row * inner_size);
-
     float max_val = -1e38f;
     for (int i = 0; i < inner_size; ++i)
       max_val = fmaxf(max_val, in_row[i]);
-
     float sum = 0.0f;
     for (int i = 0; i < inner_size; ++i) {
       float e = expf(in_row[i] - max_val);
       out_row[i] = e;
       sum += e;
     }
-
     for (int i = 0; i < inner_size; ++i)
       out_row[i] /= sum;
+  }
+}
+
+__global__ void layer_norm_kernel(const float *input, float *output,
+                                  int outer_size, int inner_size, float eps) {
+  int row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row < outer_size) {
+    const float *in_row = input + (row * inner_size);
+    float *out_row = output + (row * inner_size);
+    float mean = 0.0f;
+    for (int i = 0; i < inner_size; ++i)
+      mean += in_row[i];
+    mean /= inner_size;
+    float variance = 0.0f;
+    for (int i = 0; i < inner_size; ++i) {
+      float diff = in_row[i] - mean;
+      variance += diff * diff;
+    }
+    variance /= inner_size;
+    float inv_std = rsqrtf(variance + eps);
+    for (int i = 0; i < inner_size; ++i)
+      out_row[i] = (in_row[i] - mean) * inv_std;
   }
 }
 
@@ -55,7 +91,6 @@ __global__ void conv2d_kernel(const float *input, const float *weight,
     int h_idx = (idx / Wo) % Ho;
     int c_idx = (idx / (Wo * Ho)) % Co;
     int n_idx = idx / (Wo * Ho * Co);
-
     float sum = 0;
     for (int ic = 0; ic < Ci; ++ic) {
       for (int kh = 0; kh < Kh; ++kh) {
@@ -79,60 +114,49 @@ public:
   bool is_completed() override { return cudaStreamQuery(0) == cudaSuccess; }
 };
 
-class CUDABackend : public Backend {
+class CUDABackend : public Backend, public BackendWithRegistry {
 public:
   CUDABackend() {
     int deviceCount = 0;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
-
-    if (err != cudaSuccess) {
+    if (err != cudaSuccess)
       throw std::runtime_error("CUDA Driver Error: " +
                                std::string(cudaGetErrorString(err)));
-    }
-
-    if (deviceCount == 0) {
-      throw std::runtime_error("No CUDA-capable devices found on this system.");
-    }
-
+    if (deviceCount == 0)
+      throw std::runtime_error("No CUDA-capable devices found.");
     cudaSetDevice(0);
-
     cublasStatus_t stat = cublasCreate(&cublas_handle_);
-    if (stat != CUBLAS_STATUS_SUCCESS) {
+    if (stat != CUBLAS_STATUS_SUCCESS)
       throw std::runtime_error("Failed to initialize cuBLAS.");
-    }
 
-    std::cout << "[Lumen] CUDA Backend Initialized with Memory Pooling"
-              << std::endl;
+    register_standard_ops();
+    register_backend_ops();
+    std::cout << "[Lumen] CUDA Backend Initialized - " << supported_ops().size()
+              << " ops" << std::endl;
   }
 
   ~CUDABackend() {
     if (cublas_handle_)
       cublasDestroy(cublas_handle_);
-
     auto blocks = pool_.drain();
-    for (auto &block : blocks) {
-      // Explicitly free the managed memory pointers
+    for (auto &block : blocks)
       cudaFree(block.second);
-    }
-    std::cout << "[Lumen] CUDA Backend: Memory Pool Drained." << std::endl;
   }
+
   Buffer *create_buffer(const std::vector<size_t> &shape) override {
     size_t total_elements = 1;
     for (auto d : shape)
       total_elements *= d;
     size_t size = total_elements * sizeof(float);
-
     void *ptr = pool_.acquire(size);
     if (!ptr)
       cudaMallocManaged(&ptr, size);
-
     std::vector<size_t> strides(shape.size());
     size_t s = 1;
     for (int i = (int)shape.size() - 1; i >= 0; --i) {
       strides[i] = s;
       s *= shape[i];
     }
-
     return new Buffer(shape, strides, ptr, ptr, this, 0);
   }
 
@@ -147,7 +171,6 @@ public:
     sync(q);
   }
 
-  // Helper to resolve device pointer with offset safely
   float *get_device_ptr(Buffer *b) {
     return (float *)((char *)b->device_ptr() + b->offset_bytes());
   }
@@ -155,7 +178,6 @@ public:
   std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) override {
     if (queue.empty())
       return nullptr;
-
     for (const auto &op : queue) {
       std::vector<std::string> sub_ops;
       std::string segment;
@@ -164,66 +186,130 @@ public:
         sub_ops.push_back(segment);
 
       for (size_t i = 0; i < sub_ops.size(); ++i) {
-        const std::string &current_op = sub_ops[i];
+        OpContext ctx;
+        ctx.inputs = (i == 0) ? op.inputs : std::vector<Buffer *>{op.output};
+        ctx.output = op.output;
+        ctx.attrs = op.attrs;
 
-        // Output resolution
-        float *d_out = get_device_ptr(op.output);
-        size_t n = op.output->num_elements();
-
-        std::vector<Buffer *> effective_inputs =
-            (i == 0) ? op.inputs : std::vector<Buffer *>{op.output};
-
-        if (current_op == "add" || current_op == "mul") {
-          float *d_a = get_device_ptr(effective_inputs[0]);
-          float *d_b = get_device_ptr(effective_inputs[1]);
-          int threads = 256;
-          int blocks = (n + threads - 1) / threads;
-          if (current_op == "add")
-            add_kernel<<<blocks, threads>>>(d_a, d_b, d_out, (int)n);
-          else
-            mul_kernel<<<blocks, threads>>>(d_a, d_b, d_out, (int)n);
-        } else if (current_op == "matmul") {
-          float *d_a = get_device_ptr(effective_inputs[0]);
-          float *d_b = get_device_ptr(effective_inputs[1]);
-          int M = (int)effective_inputs[0]->shape()[0],
-              K = (int)effective_inputs[0]->shape()[1],
-              N = (int)effective_inputs[1]->shape()[1];
-          const float alpha = 1.0f, beta = 0.0f;
-          cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
-                      d_b, N, d_a, K, &beta, d_out, N);
-        } else if (current_op == "relu") {
-          // Basic inplace relu
-          float *d_in = get_device_ptr(effective_inputs[0]);
-          // Placeholder: in production, launch a relu kernel here
-          // Using simple mul with 1/0 is not efficient, needs custom kernel
-        } else if (current_op == "softmax") {
-          float *d_in = get_device_ptr(effective_inputs[0]);
-          int inner = (int)effective_inputs[0]->shape().back();
-          int outer = (int)(n / inner);
-          int threads = 256, blocks = (outer + threads - 1) / threads;
-          softmax_kernel<<<blocks, threads>>>(d_in, d_out, outer, inner);
-        } else if (current_op == "conv2d") {
-          float *d_in = get_device_ptr(effective_inputs[0]);
-          float *d_w = get_device_ptr(effective_inputs[1]);
-          auto &in_s = effective_inputs[0]->shape();
-          auto &w_s = effective_inputs[1]->shape();
-          auto &out_s = op.output->shape();
-          auto stride = op.attrs.get_int_array("stride");
-          auto padding = op.attrs.get_int_array("padding");
-          int sh = stride.empty() ? 1 : stride[0],
-              sw = stride.size() > 1 ? stride[1] : sh;
-          int ph = padding.empty() ? 0 : padding[0],
-              pw = padding.size() > 1 ? padding[1] : ph;
-          int total = out_s[0] * out_s[1] * out_s[2] * out_s[3];
-          int threads = 256, blocks = (total + threads - 1) / threads;
-          conv2d_kernel<<<blocks, threads>>>(
-              d_in, d_w, d_out, (int)in_s[0], (int)in_s[1], (int)in_s[2],
-              (int)in_s[3], (int)out_s[1], (int)w_s[2], (int)w_s[3],
-              (int)out_s[2], (int)out_s[3], sh, sw, ph, pw);
+        try {
+          execute_op(sub_ops[i], ctx);
+        } catch (const std::exception &e) {
+          std::cerr << "[CUDA] Op '" << sub_ops[i] << "' failed: " << e.what()
+                    << std::endl;
+          throw;
         }
       }
     }
     return std::make_shared<CUDAEvent>();
+  }
+
+protected:
+  void register_backend_ops() override {
+    registry_.register_op("add", [this](const OpContext &ctx) {
+      float *d_a = get_device_ptr(ctx.inputs[0]);
+      float *d_b = get_device_ptr(ctx.inputs[1]);
+      float *d_out = get_device_ptr(ctx.output);
+      size_t n = ctx.output_size();
+      int threads = 256, blocks = (n + threads - 1) / threads;
+      add_kernel<<<blocks, threads>>>(d_a, d_b, d_out, (int)n);
+    });
+
+    registry_.register_op("mul", [this](const OpContext &ctx) {
+      float *d_a = get_device_ptr(ctx.inputs[0]);
+      float *d_b = get_device_ptr(ctx.inputs[1]);
+      float *d_out = get_device_ptr(ctx.output);
+      size_t n = ctx.output_size();
+      int threads = 256, blocks = (n + threads - 1) / threads;
+      mul_kernel<<<blocks, threads>>>(d_a, d_b, d_out, (int)n);
+    });
+
+    registry_.register_op("relu", [this](const OpContext &ctx) {
+      float *d_in = get_device_ptr(ctx.inputs[0]);
+      float *d_out = get_device_ptr(ctx.output);
+      size_t n = ctx.output_size();
+      int threads = 256, blocks = (n + threads - 1) / threads;
+      relu_kernel<<<blocks, threads>>>(d_in, d_out, (int)n);
+    });
+
+    registry_.register_op("sigmoid", [this](const OpContext &ctx) {
+      float *d_in = get_device_ptr(ctx.inputs[0]);
+      float *d_out = get_device_ptr(ctx.output);
+      size_t n = ctx.output_size();
+      int threads = 256, blocks = (n + threads - 1) / threads;
+      sigmoid_kernel<<<blocks, threads>>>(d_in, d_out, (int)n);
+    });
+
+    registry_.register_op("tanh", [this](const OpContext &ctx) {
+      float *d_in = get_device_ptr(ctx.inputs[0]);
+      float *d_out = get_device_ptr(ctx.output);
+      size_t n = ctx.output_size();
+      int threads = 256, blocks = (n + threads - 1) / threads;
+      tanh_kernel<<<blocks, threads>>>(d_in, d_out, (int)n);
+    });
+
+    registry_.register_op("matmul", [this](const OpContext &ctx) {
+      float *d_a = get_device_ptr(ctx.inputs[0]);
+      float *d_b = get_device_ptr(ctx.inputs[1]);
+      float *d_out = get_device_ptr(ctx.output);
+      int M = (int)ctx.inputs[0]->shape()[0];
+      int K = (int)ctx.inputs[0]->shape()[1];
+      int N = (int)ctx.inputs[1]->shape()[1];
+      const float alpha = 1.0f, beta = 0.0f;
+      cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
+                  d_b, N, d_a, K, &beta, d_out, N);
+    });
+
+    registry_.register_op("softmax", [this](const OpContext &ctx) {
+      float *d_in = get_device_ptr(ctx.inputs[0]);
+      float *d_out = get_device_ptr(ctx.output);
+      int inner = (int)ctx.inputs[0]->shape().back();
+      int outer = (int)(ctx.output_size() / inner);
+      int threads = 256, blocks = (outer + threads - 1) / threads;
+      softmax_kernel<<<blocks, threads>>>(d_in, d_out, outer, inner);
+    });
+
+    registry_.register_op("layer_norm", [this](const OpContext &ctx) {
+      float *d_in = get_device_ptr(ctx.inputs[0]);
+      float *d_out = get_device_ptr(ctx.output);
+      float eps = ctx.attrs.get_float("epsilon", 1e-5f);
+      int inner = (int)ctx.inputs[0]->shape().back();
+      int outer = (int)(ctx.output_size() / inner);
+      int threads = 256, blocks = (outer + threads - 1) / threads;
+      layer_norm_kernel<<<blocks, threads>>>(d_in, d_out, outer, inner, eps);
+    });
+
+    registry_.register_op("conv2d", [this](const OpContext &ctx) {
+      float *d_in = get_device_ptr(ctx.inputs[0]);
+      float *d_w = get_device_ptr(ctx.inputs[1]);
+      float *d_out = get_device_ptr(ctx.output);
+      auto &in_s = ctx.inputs[0]->shape();
+      auto &w_s = ctx.inputs[1]->shape();
+      auto &out_s = ctx.output->shape();
+      auto stride = ctx.attrs.get_int_array("stride");
+      auto padding = ctx.attrs.get_int_array("padding");
+      int sh = stride.empty() ? 1 : stride[0],
+          sw = stride.size() > 1 ? stride[1] : sh;
+      int ph = padding.empty() ? 0 : padding[0],
+          pw = padding.size() > 1 ? padding[1] : ph;
+      int total = out_s[0] * out_s[1] * out_s[2] * out_s[3];
+      int threads = 256, blocks = (total + threads - 1) / threads;
+      conv2d_kernel<<<blocks, threads>>>(
+          d_in, d_w, d_out, (int)in_s[0], (int)in_s[1], (int)in_s[2],
+          (int)in_s[3], (int)out_s[1], (int)w_s[2], (int)w_s[3], (int)out_s[2],
+          (int)out_s[3], sh, sw, ph, pw);
+    });
+
+    registry_.register_op("flatten", [this](const OpContext &ctx) {
+      cudaMemcpyAsync(get_device_ptr(ctx.output), get_device_ptr(ctx.inputs[0]),
+                      ctx.output_size() * sizeof(float),
+                      cudaMemcpyDeviceToDevice);
+    });
+
+    registry_.register_op("reshape", [this](const OpContext &ctx) {
+      cudaMemcpyAsync(get_device_ptr(ctx.output), get_device_ptr(ctx.inputs[0]),
+                      ctx.output_size() * sizeof(float),
+                      cudaMemcpyDeviceToDevice);
+    });
   }
 
 private:
