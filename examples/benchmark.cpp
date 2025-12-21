@@ -22,57 +22,46 @@ void test_cpu_fallback() {
   try {
     rt.set_backend("cpu");
   } catch (...) {
-    std::cout << "SKIPPED: CPU backend not found (should not happen)."
-              << std::endl;
+    std::cout << "SKIPPED: CPU backend not found." << std::endl;
     return;
   }
 
-  if (rt.current_backend() != "cpu") {
-    std::cout << "SKIPPED: CPU backend not found (should not happen)."
-              << std::endl;
+  if (rt.current_backend() != "cpu")
     return;
-  }
 
-  auto *A = rt.alloc({1});
-  auto *B = rt.alloc({1});
-  auto *C = rt.alloc({1});
+  auto A = rt.alloc({1});
+  auto B = rt.alloc({1});
+  auto C = rt.alloc({1});
 
   *(float *)A->data() = 10.0f;
   *(float *)B->data() = 5.0f;
 
-  // CPU executes synchronously immediately inside sync/execute
   rt.execute("add", {A, B}, C);
-
   assert(*(float *)C->data() == 15.0f);
 
   rt.execute("mul", {A, B}, C);
   assert(*(float *)C->data() == 50.0f);
 
   std::cout << "PASS: CPU Backend Functional Test" << std::endl;
-  delete A;
-  delete B;
-  delete C;
 }
 
-// 2. Existing Metal Tests (Runs on default backend)
+// 2. Existing Metal Tests
 void test_metal_features() {
   lumen::Runtime rt;
 
   try {
     rt.set_backend("metal");
   } catch (...) {
-    // Silently skip if metal is not available
     return;
   }
 
   if (rt.current_backend() != "metal")
     return;
 
-  // Zero-Copy Check
   size_t n = 1024;
-  auto *A = rt.alloc({n});
-  auto *B = rt.alloc({n});
-  auto *C = rt.alloc({n});
+  auto A = rt.alloc({n});
+  auto B = rt.alloc({n});
+  auto C = rt.alloc({n});
 
   float *a_ptr = (float *)A->data();
   float *b_ptr = (float *)B->data();
@@ -85,9 +74,6 @@ void test_metal_features() {
   assert(((float *)C->data())[0] == 2.0f);
 
   std::cout << "PASS: Metal Backend (Zero-Copy & Ops)" << std::endl;
-  delete A;
-  delete B;
-  delete C;
 }
 
 // 3. Compare Performance: Metal vs CPU
@@ -96,40 +82,33 @@ void benchmark_backend_comparison() {
   size_t dim = 4096;
 
   auto run_bench = [&](const std::string &backend) {
-    // FIX: Catch the exception if the backend is not available
     try {
       rt.set_backend(backend);
     } catch (const std::exception &e) {
-      // Backend not compiled or not found
       return;
     }
 
-    // Only run if the backend is actually active on this system
     if (rt.current_backend() != backend && backend != "cpu")
       return;
 
-    auto *A = rt.alloc({dim, dim});
-    auto *B = rt.alloc({dim, dim});
-    auto *C = rt.alloc({dim, dim});
+    auto A = rt.alloc({dim, dim});
+    auto B = rt.alloc({dim, dim});
+    auto C = rt.alloc({dim, dim});
 
-    // Warmup: Build cache and ensure buffers are on device
+    // Warmup
     rt.execute("matmul", {A, B}, C);
     rt.submit();
     rt.wait_all();
 
     auto start = std::chrono::high_resolution_clock::now();
     rt.execute("matmul", {A, B}, C);
-    rt.submit(); // Measure true execution
+    rt.submit();
     rt.wait_all();
     auto end = std::chrono::high_resolution_clock::now();
 
     std::cout << "PASS: " << backend << " MatMul (" << dim << "x" << dim << ")"
               << std::endl;
     print_metrics("Latency", end - start);
-
-    delete A;
-    delete B;
-    delete C;
   };
 
   std::cout << "\n--- Performance Comparison ---" << std::endl;
@@ -142,33 +121,22 @@ void test_intelligent_routing() {
   std::cout << "\n--- Testing Intelligent Router ---" << std::endl;
   lumen::Runtime rt;
 
-  // 1. Small Operation (Should route to CPU)
-  auto *A = rt.alloc({10});
-  auto *B = rt.alloc({10});
-  auto *C = rt.alloc({10});
+  // 1. Small Operation
+  auto A = rt.alloc({10});
+  auto B = rt.alloc({10});
+  auto C = rt.alloc({10});
 
-  // CPU is faster for tiny ops (low latency)
   rt.execute("add", {A, B}, C);
-  // If you print rt.current_backend(), it should be 'cpu'
 
-  // 2. Heavy Operation (Should route to GPU if available)
+  // 2. Heavy Operation
   size_t dim = 2048;
-  auto *BigA = rt.alloc({dim, dim});
-  auto *BigB = rt.alloc({dim, dim});
-  auto *BigC = rt.alloc({dim, dim});
+  auto BigA = rt.alloc({dim, dim});
+  auto BigB = rt.alloc({dim, dim});
+  auto BigC = rt.alloc({dim, dim});
 
-  // GPU is faster for throughput
   rt.execute("matmul", {BigA, BigB}, BigC);
-  // If CUDA is working, it should switch. If broken, it falls back to CPU.
 
   std::cout << "PASS: Intelligent Routing Logic Executed" << std::endl;
-
-  delete A;
-  delete B;
-  delete C;
-  delete BigA;
-  delete BigB;
-  delete BigC;
 }
 
 void benchmark_memory_optimization() {
@@ -176,9 +144,8 @@ void benchmark_memory_optimization() {
   lumen::Runtime rt;
   lumen::Graph graph;
 
-  // Create a long sequential chain (Deep MLP)
   size_t layers = 20;
-  size_t dim = 1024; // 4MB per buffer
+  size_t dim = 1024;
   auto *current = graph.add_input("input", {1, dim});
 
   for (size_t i = 0; i < layers; ++i) {
@@ -188,17 +155,14 @@ void benchmark_memory_optimization() {
   }
   graph.mark_output(current);
 
-  // Compile and measure
   auto *executable = graph.compile(&rt);
 
-  size_t total_alloc =
-      layers * 2 * (dim * dim * sizeof(float));     // Matmul + Relu per layer
-  size_t peak_mem = executable->get_memory_usage(); // From your Memory Planner
+  size_t total_alloc = layers * 2 * (dim * dim * sizeof(float));
+  size_t peak_mem = executable->get_memory_usage();
 
   double savings = (1.0 - (double)peak_mem / total_alloc) * 100.0;
 
   std::cout << "  - Total Layers: " << layers << std::endl;
-  // Without optimization, memory would scale linearly with layers
   std::cout << "  - Naive Memory Needed: " << total_alloc / (1024.0 * 1024.0)
             << " MB" << std::endl;
   std::cout << "  - Optimized Peak Memory: " << peak_mem / (1024.0 * 1024.0)
@@ -213,7 +177,6 @@ void benchmark_inference_throughput() {
   lumen::Runtime rt;
   lumen::Graph graph;
 
-  // Simple CNN-like block
   auto *in = graph.add_input("in", {1, 3, 224, 224});
   auto *w = graph.add_weight("w", {64, 3, 3, 3});
   lumen::OpAttributes attrs;
@@ -225,7 +188,7 @@ void benchmark_inference_throughput() {
   graph.mark_output(out);
 
   auto *executable = graph.compile(&rt);
-  auto *input_buf = rt.alloc({1, 3, 224, 224});
+  auto input_buf = rt.alloc({1, 3, 224, 224});
 
   std::cout << "\n--- Throughput Benchmark (100 iterations) ---" << std::endl;
   auto start = std::chrono::high_resolution_clock::now();
@@ -244,7 +207,6 @@ void benchmark_inference_throughput() {
             << std::endl;
 
   delete executable;
-  delete input_buf;
 }
 
 int main() {

@@ -238,7 +238,8 @@ public:
     double time_ms;
     std::string backend;
   };
-  std::vector<ProfilingData> profile(const std::vector<Buffer *> &inputs);
+  std::vector<ProfilingData>
+  profile(const std::vector<std::shared_ptr<Buffer>> &inputs);
 
 private:
   Runtime *runtime_;

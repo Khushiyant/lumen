@@ -345,6 +345,7 @@ void ExecutableGraph::allocate_buffers(const Graph *graph) {
       free_pool.erase(it);
     } else {
       buf = runtime_->alloc(nodes[i]->output()->shape());
+      total_memory_bytes_ += liveness.size_bytes;
     }
 
     assignments[out_name] = buf;
@@ -434,29 +435,41 @@ ExecutableGraph::execute(const std::vector<std::shared_ptr<Buffer>> &inputs) {
   return {execution_plan_.back().output};
 }
 
-void ExecutableGraph::execute(const std::vector<Buffer *> &inputs,
-                              const std::vector<Buffer *> &outputs) {
+void ExecutableGraph::execute(
+    const std::vector<std::shared_ptr<Buffer>> &inputs,
+    const std::vector<std::shared_ptr<Buffer>> &outputs) {
   auto result = execute(inputs);
   for (size_t i = 0; i < outputs.size() && i < result.size(); ++i) {
     std::memcpy(outputs[i]->data(), result[i]->data(), result[i]->size_bytes());
   }
 }
 
+// lumen/src/core/graph.cpp
+
 std::vector<ExecutableGraph::ProfilingData>
-ExecutableGraph::profile(const std::vector<Buffer *> &inputs) {
+ExecutableGraph::profile(const std::vector<std::shared_ptr<Buffer>> &inputs) {
   std::vector<ProfilingData> results;
   size_t input_idx = 0;
   for (auto &op : execution_plan_) {
-    std::vector<Buffer *> actual_inputs = op.inputs;
+    // Correctly define actual_inputs as a vector of shared_ptrs
+    std::vector<std::shared_ptr<Buffer>> actual_inputs = op.inputs;
+
     for (size_t i = 0; i < actual_inputs.size(); ++i) {
-      if (actual_inputs[i] == nullptr)
+      if (actual_inputs[i] == nullptr) {
+        // This assignment now works because both sides are shared_ptr<Buffer>
         actual_inputs[i] = inputs[input_idx++];
+      }
     }
+
     auto start = std::chrono::high_resolution_clock::now();
+
+    // Pass the correct shared_ptr vector to runtime
     runtime_->execute(op.op_name, actual_inputs, op.output, op.attrs);
+
     runtime_->submit();
     runtime_->wait_all();
     auto end = std::chrono::high_resolution_clock::now();
+
     ProfilingData data;
     data.node_name = op.op_name;
     data.op_type = op.op_name;

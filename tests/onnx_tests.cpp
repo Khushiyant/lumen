@@ -15,12 +15,11 @@ void test_onnx_loading() {
   auto *executable = graph->compile(&rt);
 
   // 4. Run inference
-  auto *input_buf = rt.alloc({1, 1, 28, 28});
+  auto input_buf = rt.alloc({1, 1, 28, 28});
   auto outputs = executable->execute({input_buf});
 
   std::cout << "Successfully ran inference on ONNX model!" << std::endl;
 
   delete executable;
-  delete input_buf;
+  // input_buf deleted automatically
 }
-

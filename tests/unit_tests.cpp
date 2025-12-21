@@ -8,9 +8,9 @@ void test_onnx_loading();
 
 void test_ops() {
   lumen::Runtime rt;
-  auto *A = rt.alloc({1});
-  auto *B = rt.alloc({1});
-  auto *C = rt.alloc({1});
+  auto A = rt.alloc({1});
+  auto B = rt.alloc({1});
+  auto C = rt.alloc({1});
 
   *(float *)A->data() = 20.0f;
   *(float *)B->data() = 4.0f;
@@ -22,17 +22,14 @@ void test_ops() {
   assert(*(float *)C->data() == 80.0f);
 
   std::cout << "PASS: Basic Operations (Add/Mul)" << std::endl;
-  delete A;
-  delete B;
-  delete C;
 }
 
 void test_matrix_multiplication() {
   lumen::Runtime rt;
   size_t dim = 4;
-  auto *A = rt.alloc({dim, dim});
-  auto *B = rt.alloc({dim, dim});
-  auto *C = rt.alloc({dim, dim});
+  auto A = rt.alloc({dim, dim});
+  auto B = rt.alloc({dim, dim});
+  auto C = rt.alloc({dim, dim});
 
   float *a_ptr = static_cast<float *>(A->data());
   float *b_ptr = static_cast<float *>(B->data());
@@ -49,9 +46,6 @@ void test_matrix_multiplication() {
     assert(std::abs(c_ptr[i] - 5.0f) < 1e-5);
   }
 
-  delete A;
-  delete B;
-  delete C;
   std::cout << "PASS: Matrix Multiplication" << std::endl;
 }
 
@@ -62,7 +56,6 @@ int main() {
   test_matrix_multiplication();
 
   std::cout << "\n--- Starting ONNX Integration Test ---" << std::endl;
-  // This will throw an exception if the model or importer fails
   try {
     test_onnx_loading();
     std::cout << "PASS: ONNX Loading & Inference" << std::endl;

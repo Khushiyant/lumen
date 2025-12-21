@@ -177,7 +177,7 @@ public:
 
   void execute(const std::string &op_name,
                const std::vector<std::shared_ptr<Buffer>> &inputs,
-               std::shared_ptr<Buffer> output);
+               std::shared_ptr<Buffer> output, const OpAttributes &attrs = {});
 
   std::vector<std::shared_ptr<Event>> submit();
   void wait_all();

@@ -398,8 +398,9 @@ private:
     std::stringstream ss;
     for (const auto &op : queue) {
       ss << op.op_name << "(";
-      for (auto *b : op.inputs) {
-        for (auto d : b->shape())
+      for (const auto &b : op.inputs) {
+        Buffer *raw_buf = b.get();
+        for (auto d : raw_buf->shape())
           ss << d << ",";
         ss << "|";
       }

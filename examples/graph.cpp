@@ -20,7 +20,7 @@ void example_linear_model() {
   graph.optimize();
   auto *executable = graph.compile(&rt);
 
-  auto *input_buffer = rt.alloc({1, 10});
+  auto input_buffer = rt.alloc({1, 10}); // Shared ptr
   float *input_data = (float *)input_buffer->data();
   for (int i = 0; i < 10; i++)
     input_data[i] = 1.0f;
@@ -33,7 +33,7 @@ void example_linear_model() {
   std::cout << "]" << std::endl;
 
   delete executable;
-  delete input_buffer;
+  // Buffer deleted automatically
 }
 
 // Example 2: Conv2d + ReLU (with fusion)

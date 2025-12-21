@@ -54,10 +54,13 @@ void test_operation_parity(const std::string &op_name,
       continue;
     }
 
-    // Allocate buffers
-    auto *input1 = rt.alloc(input_shape1);
-    auto *input2 = input_shape2.empty() ? nullptr : rt.alloc(input_shape2);
-    auto *output = rt.alloc(output_shape);
+    // Allocate buffers (now shared_ptr)
+    auto input1 = rt.alloc(input_shape1);
+    std::shared_ptr<lumen::Buffer> input2 = nullptr;
+    if (!input_shape2.empty()) {
+      input2 = rt.alloc(input_shape2);
+    }
+    auto output = rt.alloc(output_shape);
 
     // Initialize inputs with test data
     float *in1_data = (float *)input1->data();
@@ -73,7 +76,7 @@ void test_operation_parity(const std::string &op_name,
     }
 
     // Execute operation
-    std::vector<lumen::Buffer *> inputs = {input1};
+    std::vector<std::shared_ptr<lumen::Buffer>> inputs = {input1};
     if (input2)
       inputs.push_back(input2);
 
@@ -106,12 +109,7 @@ void test_operation_parity(const std::string &op_name,
     } catch (const std::exception &e) {
       std::cout << "  [" << backend << "] ✗ Failed: " << e.what() << std::endl;
     }
-
-    // Cleanup
-    delete input1;
-    if (input2)
-      delete input2;
-    delete output;
+    // Shared pointers automatically clean up
   }
 }
 
