@@ -3,6 +3,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <lumen/graph.hpp>
 #include <lumen/lumen.hpp>
 #include <vector>
 
@@ -148,6 +149,78 @@ void test_intelligent_routing() {
   delete BigC;
 }
 
+void benchmark_memory_optimization() {
+  std::cout << "\n--- Benchmarking Memory Planner Efficiency ---" << std::endl;
+  lumen::Runtime rt;
+  lumen::Graph graph;
+
+  // Create a long sequential chain (Deep MLP)
+  size_t layers = 20;
+  size_t dim = 1024; // 4MB per buffer
+  auto *current = graph.add_input("input", {1, dim});
+
+  for (size_t i = 0; i < layers; ++i) {
+    auto *weight = graph.add_weight("w" + std::to_string(i), {dim, dim});
+    current = graph.add_op("matmul", {current, weight});
+    current = graph.add_op("relu", {current});
+  }
+  graph.mark_output(current);
+
+  // Compile and measure
+  auto *executable = graph.compile(&rt);
+
+  size_t total_alloc =
+      layers * 2 * (dim * dim * sizeof(float));     // Matmul + Relu per layer
+  size_t peak_mem = executable->get_memory_usage(); // From your Memory Planner
+
+  double savings = (1.0 - (double)peak_mem / total_alloc) * 100.0;
+
+  std::cout << "  - Total Layers: " << layers << std::endl;
+  // Without optimization, memory would scale linearly with layers
+  std::cout << "  - Naive Memory Needed: " << total_alloc / (1024.0 * 1024.0)
+            << " MB" << std::endl;
+  std::cout << "  - Optimized Peak Memory: " << peak_mem / (1024.0 * 1024.0)
+            << " MB" << std::endl;
+  std::cout << "  - VRAM Savings: " << std::fixed << std::setprecision(2)
+            << savings << "%" << std::endl;
+
+  delete executable;
+}
+
+void benchmark_inference_throughput() {
+  lumen::Runtime rt;
+  lumen::Graph graph;
+
+  // Simple CNN-like block
+  auto *in = graph.add_input("in", {1, 3, 224, 224});
+  auto *w = graph.add_weight("w", {64, 3, 3, 3});
+  auto *conv = graph.add_op("conv2d", {in, w});
+  auto *out = graph.add_op("relu", {conv});
+  graph.mark_output(out);
+
+  auto *executable = graph.compile(&rt);
+  auto *input_buf = rt.alloc({1, 3, 224, 224});
+
+  std::cout << "\n--- Throughput Benchmark (100 iterations) ---" << std::endl;
+  auto start = std::chrono::high_resolution_clock::now();
+
+  for (int i = 0; i < 100; ++i) {
+    executable->execute({input_buf});
+  }
+
+  auto end = std::chrono::high_resolution_clock::now();
+  double total_ms =
+      std::chrono::duration<double, std::milli>(end - start).count();
+
+  std::cout << "  - Average Latency: " << total_ms / 100.0 << " ms"
+            << std::endl;
+  std::cout << "  - Throughput: " << 1000.0 / (total_ms / 100.0) << " IPS"
+            << std::endl;
+
+  delete executable;
+  delete input_buf;
+}
+
 int main() {
   std::cout << "--- Starting Lumen Multi-Backend Tests ---" << std::endl;
 
@@ -155,6 +228,8 @@ int main() {
   test_metal_features();
   benchmark_backend_comparison();
   test_intelligent_routing();
+  benchmark_memory_optimization();
+  benchmark_inference_throughput();
 
   std::cout << "--- All Tests Completed Successfully ---" << std::endl;
   return 0;

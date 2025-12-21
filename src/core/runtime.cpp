@@ -49,24 +49,18 @@ void *Buffer::data() {
   return (char *)host_ptr_ + (offset_ * sizeof(float));
 }
 
-size_t Buffer::size_bytes() const {
-  size_t total = 1;
-  for (auto d : shape_)
-    total *= d;
-  return total * sizeof(float);
-}
 
 // --- Runtime Implementation ---
 Runtime::Runtime() {
   backends_["cpu"] = create_cpu_backend();
-#ifdef LUMEN_USE_METAL
+  #ifdef LUMEN_USE_METAL
   backends_["metal"] = create_metal_backend();
-#endif
-#ifdef LUMEN_USE_CUDA
-    backends_["cuda"] = create_cuda_backend();
-
-#endif
-
+  #endif
+  #ifdef LUMEN_USE_CUDA
+  backends_["cuda"] = create_cuda_backend();
+  
+  #endif
+  
   run_startup_benchmarks();
   active_backend_name_ = "dynamic";
   active_backend_ = nullptr;
@@ -82,7 +76,7 @@ void Runtime::run_startup_benchmarks() {
     auto *tA = backend->create_buffer({dim, dim});
     auto *tB = backend->create_buffer({dim, dim});
     auto *tC = backend->create_buffer({dim, dim});
-
+    
     // FIXED: Create a named variable to resolve the lvalue reference error
     QueuedOp startup_op;
     startup_op.op_name = "matmul";
@@ -91,23 +85,35 @@ void Runtime::run_startup_benchmarks() {
     startup_op.target_backend = name;
     std::vector<QueuedOp> startup_queue = {startup_op};
     auto ev = backend->sync(startup_queue);
-
+    
     if (ev)
-      ev->wait();
-
-    auto end = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(end - start).count();
-
-    // Store real throughput metrics
-    metrics_[name]["matmul"] = {ms, (double)(dim * dim * dim) / (ms * 1e3)};
-    delete tA;
-    delete tB;
-    delete tC;
-  }
+    ev->wait();
+  
+  auto end = std::chrono::high_resolution_clock::now();
+  double ms = std::chrono::duration<double, std::milli>(end - start).count();
+  
+  // Store real throughput metrics
+  metrics_[name]["matmul"] = {ms, (double)(dim * dim * dim) / (ms * 1e3)};
+  delete tA;
+  delete tB;
+  delete tC;
+}
 }
 
+
+size_t Buffer::num_elements() const {
+  size_t total = 1;
+  for (auto d : shape_)
+  total *= d;
+return total;
+}
+
+// Update size_bytes to use num_elements
+size_t Buffer::size_bytes() const { return num_elements() * sizeof(float); }
+
 void Runtime::execute(const std::string &op_name,
-                      const std::vector<Buffer *> &inputs, Buffer *output) {
+                      const std::vector<Buffer *> &inputs, Buffer *output,
+                      const OpAttributes &attrs) {
   Backend *target = active_backend_
                         ? active_backend_
                         : router_->select_backend(op_name, output->shape(),
@@ -124,9 +130,10 @@ void Runtime::execute(const std::string &op_name,
   op.op_name = op_name;
   op.inputs = inputs;
   op.output = output;
+  op.attrs = attrs;
   op.target_backend = target_name;
   queue_.push_back(op);
-  
+
   output->set_location(BufferLocation::DEVICE_ONLY);
 }
 

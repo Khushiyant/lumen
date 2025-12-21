@@ -15,36 +15,6 @@ namespace lumen {
 
 enum class DataType { FLOAT32, FLOAT16, INT8, INT32, INT64, BOOL };
 
-// Flexible attribute system for operation parameters
-struct OpAttributes {
-  std::map<std::string, int> int_attrs;
-  std::map<std::string, float> float_attrs;
-  std::map<std::string, std::vector<int>> int_array_attrs;
-  std::map<std::string, std::string> string_attrs;
-  std::map<std::string, bool> bool_attrs;
-
-  // Convenience getters with defaults
-  int get_int(const std::string &key, int default_val = 0) const {
-    auto it = int_attrs.find(key);
-    return it != int_attrs.end() ? it->second : default_val;
-  }
-
-  float get_float(const std::string &key, float default_val = 0.0f) const {
-    auto it = float_attrs.find(key);
-    return it != float_attrs.end() ? it->second : default_val;
-  }
-
-  std::vector<int> get_int_array(const std::string &key) const {
-    auto it = int_array_attrs.find(key);
-    return it != int_array_attrs.end() ? it->second : std::vector<int>{};
-  }
-
-  bool get_bool(const std::string &key, bool default_val = false) const {
-    auto it = bool_attrs.find(key);
-    return it != bool_attrs.end() ? it->second : default_val;
-  }
-};
-
 // Extended QueuedOp with attributes for graph execution
 struct QueuedOpWithAttrs {
   std::string op_name;

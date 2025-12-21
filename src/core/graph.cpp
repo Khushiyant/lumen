@@ -1,6 +1,7 @@
 #include "lumen/graph.hpp"
 #include <algorithm>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <unordered_set>
 
@@ -40,6 +41,8 @@ ShapeInference::infer_shape(const std::string &op_type,
     for (size_t i = 1; i < in_shape.size(); ++i)
       total *= in_shape[i];
     return {in_shape[0], total};
+  } else if (op_type == "softmax") {
+    return inputs[0]->shape();
   } else {
     // Default: keep same shape as input
     return inputs[0]->shape();
@@ -381,14 +384,30 @@ ExecutableGraph::ExecutableGraph(Runtime *rt, const Graph *graph)
 }
 
 ExecutableGraph::~ExecutableGraph() {
-  // Clean up buffers
-  for (auto &[name, buf] : intermediate_buffers_) {
+  // Use a set to collect unique physical buffers.
+  // This prevents double-freeing when multiple tensors share a buffer.
+  std::set<Buffer *> unique_buffers;
+
+  // 1. Collect from intermediate buffers
+  for (auto const &[name, buf] : intermediate_buffers_) {
+    if (buf)
+      unique_buffers.insert(buf);
+  }
+
+  // 2. Collect from weight buffers
+  for (auto const &[name, buf] : weight_buffers_) {
+    if (buf)
+      unique_buffers.insert(buf);
+  }
+
+  // 3. Delete each unique buffer exactly once
+  for (Buffer *buf : unique_buffers) {
     delete buf;
   }
-  for (auto &[name, buf] : weight_buffers_) {
-    delete buf;
-  }
-  // Note: output_buffers_ are owned by caller, don't delete
+
+  // Clear maps to prevent dangling pointers
+  intermediate_buffers_.clear();
+  weight_buffers_.clear();
 }
 
 void ExecutableGraph::allocate_buffers(const Graph *graph) {
@@ -532,42 +551,41 @@ ExecutableGraph::get_or_create_buffer(const std::string &name,
   return buf;
 }
 
+// lumen/src/core/graph.cpp
+
 std::vector<Buffer *>
 ExecutableGraph::execute(const std::vector<Buffer *> &inputs) {
-
-  // Map graph inputs to provided input buffers
-  // (Simplified: assumes inputs are provided in order)
   size_t input_idx = 0;
+
+  // Iterate through the plan and inject provided buffers where placeholders
+  // (nullptr) exist
   for (auto &op : execution_plan_) {
-    for (size_t i = 0; i < op.inputs.size(); ++i) {
-      if (op.inputs[i] == nullptr) {
-        // This is a graph input
-        if (input_idx >= inputs.size()) {
-          throw GraphException("Not enough input buffers provided");
+    std::vector<Buffer *> runtime_inputs = op.inputs;
+
+    for (size_t i = 0; i < runtime_inputs.size(); ++i) {
+      if (runtime_inputs[i] == nullptr) {
+        if (input_idx < inputs.size()) {
+          runtime_inputs[i] = inputs[input_idx++];
+        } else {
+          throw GraphException(
+              "Not enough input buffers provided for execution.");
         }
-        op.inputs[i] = inputs[input_idx++];
       }
     }
+
+    // Call execute exactly ONCE with the resolved buffers and attributes
+    runtime_->execute(op.op_name, runtime_inputs, op.output, op.attrs);
   }
 
-  // Execute all operations
-  for (auto &op : execution_plan_) {
-    runtime_->execute(op.op_name, op.inputs, op.output);
-  }
-
-  // Submit and wait
+  // Submit the entire plan to the hardware and wait for completion
   runtime_->submit();
   runtime_->wait_all();
 
-  // Return output buffers
-  std::vector<Buffer *> outputs;
-  // (In full implementation, would map graph outputs to buffers)
-  // For now, return the last intermediate buffer
+  // Return the output buffers (the final op's output)
   if (!execution_plan_.empty()) {
-    outputs.push_back(execution_plan_.back().output);
+    return {execution_plan_.back().output};
   }
-
-  return outputs;
+  return {};
 }
 
 void ExecutableGraph::execute(const std::vector<Buffer *> &inputs,
@@ -582,26 +600,26 @@ void ExecutableGraph::execute(const std::vector<Buffer *> &inputs,
   }
 }
 
+// lumen/src/core/graph.cpp
+
 std::vector<ExecutableGraph::ProfilingData>
 ExecutableGraph::profile(const std::vector<Buffer *> &inputs) {
-
   std::vector<ProfilingData> results;
-
-  // Map inputs (same as execute)
   size_t input_idx = 0;
+
   for (auto &op : execution_plan_) {
-    for (size_t i = 0; i < op.inputs.size(); ++i) {
-      if (op.inputs[i] == nullptr) {
-        op.inputs[i] = inputs[input_idx++];
+    // Resolve inputs for this specific run without modifying op.inputs
+    std::vector<Buffer *> actual_inputs = op.inputs;
+    for (size_t i = 0; i < actual_inputs.size(); ++i) {
+      if (actual_inputs[i] == nullptr) {
+        actual_inputs[i] = inputs[input_idx++];
       }
     }
-  }
 
-  // Profile each operation
-  for (auto &op : execution_plan_) {
     auto start = std::chrono::high_resolution_clock::now();
 
-    runtime_->execute(op.op_name, op.inputs, op.output);
+    // Use the resolved inputs
+    runtime_->execute(op.op_name, actual_inputs, op.output, op.attrs);
     runtime_->submit();
     runtime_->wait_all();
 
@@ -613,7 +631,6 @@ ExecutableGraph::profile(const std::vector<Buffer *> &inputs) {
     data.op_type = op.op_name;
     data.time_ms = ms;
     data.backend = runtime_->current_backend();
-
     results.push_back(data);
   }
 

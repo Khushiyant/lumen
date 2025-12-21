@@ -136,7 +136,47 @@ public:
             res = [graph matrixMultiplicationWithPrimaryTensor:ins[0]
                                                secondaryTensor:ins[1]
                                                           name:nil];
+          else if (op.op_name == "softmax") {
+            // MPSGraph uses the 'axis' parameter. Last dimension is -1.
+            res = [graph softMaxWithTensor:ins[0] axis:-1 name:nil];
+          } else if (op.op_name == "conv2d") {
+            auto strides = op.attrs.get_int_array("stride");
+            auto padding = op.attrs.get_int_array("padding");
 
+            // FIX: Selector order is X then Y
+            MPSGraphConvolution2DOpDescriptor *desc =
+                [MPSGraphConvolution2DOpDescriptor
+                    descriptorWithStrideInX:(strides.size() > 1 ? strides[1]
+                                                                : 1)
+                                  strideInY:(strides.empty()
+                                                 ? 1
+                                                 : strides[0])dilationRateInX:1
+                            dilationRateInY:1
+                                     groups:1
+                               paddingStyle:MPSGraphPaddingStyleExplicit
+                                 dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+                              weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+
+            [desc
+                setExplicitPaddingWithPaddingLeft:(padding.size() > 1
+                                                       ? padding[1]
+                                                       : 0)
+                                     paddingRight:(padding.size() > 1
+                                                       ? padding[1]
+                                                       : 0)
+                                       paddingTop:(padding.empty() ? 0
+                                                                   : padding[0])
+                                       paddingBottom:(padding.empty()
+                                                          ? 0
+                                                          : padding[0])];
+
+            res = [graph convolution2DWithSourceTensor:ins[0]
+                                         weightsTensor:ins[1]
+                                            descriptor:desc
+                                                  name:nil];
+          } else if (op.op_name == "global_average_pool") {
+            res = [graph meanOfTensor:ins[0] axes:@[ @2, @3 ] name:nil];
+          }
           if (res) {
             buffer_to_tensor[op.output] = res;
             [targetTensors addObject:res];

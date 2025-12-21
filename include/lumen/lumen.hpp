@@ -1,5 +1,6 @@
 #pragma once
 #include <chrono>
+#include <cstddef>
 #include <list>
 #include <map>
 #include <memory>
@@ -52,10 +53,40 @@ class Runtime;
 
 enum class BufferLocation { HOST_ONLY, DEVICE_ONLY, BOTH_SYNCED };
 
+struct OpAttributes {
+  std::map<std::string, int> int_attrs;
+  std::map<std::string, float> float_attrs;
+  std::map<std::string, std::vector<int>> int_array_attrs;
+  std::map<std::string, std::string> string_attrs;
+  std::map<std::string, bool> bool_attrs;
+
+  // Convenience getters with defaults
+  int get_int(const std::string &key, int default_val = 0) const {
+    auto it = int_attrs.find(key);
+    return it != int_attrs.end() ? it->second : default_val;
+  }
+
+  float get_float(const std::string &key, float default_val = 0.0f) const {
+    auto it = float_attrs.find(key);
+    return it != float_attrs.end() ? it->second : default_val;
+  }
+
+  std::vector<int> get_int_array(const std::string &key) const {
+    auto it = int_array_attrs.find(key);
+    return it != int_array_attrs.end() ? it->second : std::vector<int>{};
+  }
+
+  bool get_bool(const std::string &key, bool default_val = false) const {
+    auto it = bool_attrs.find(key);
+    return it != bool_attrs.end() ? it->second : default_val;
+  }
+};
+
 struct QueuedOp {
   std::string op_name;
   std::vector<Buffer *> inputs;
   Buffer *output;
+  OpAttributes attrs; 
   std::string target_backend;
 };
 
@@ -88,6 +119,7 @@ public:
   void set_runtime(Runtime *rt) { runtime_context_ = rt; }
   const std::vector<size_t> &shape() const { return shape_; }
   const std::vector<size_t> &strides() const { return strides_; }
+  size_t num_elements() const;
   size_t size_bytes() const;
   void *device_handle() const {
     return (char *)device_ptr_ + (offset_ * sizeof(float));
@@ -126,7 +158,7 @@ public:
   Buffer *alloc(const std::vector<size_t> &shape);
 
   void execute(const std::string &op_name, const std::vector<Buffer *> &inputs,
-               Buffer *output);
+               Buffer *output, const OpAttributes &attrs = {});
 
   std::vector<std::shared_ptr<Event>> submit();
   void wait_all();
