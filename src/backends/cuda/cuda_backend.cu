@@ -172,10 +172,16 @@ public:
     sync(q);
   }
 
-  float *get_device_ptr(const std::shared_ptr<Buffer> &b) {
+  float *get_device_ptr(Buffer *b) {
     return (float *)((char *)b->device_ptr() + b->offset_bytes());
   }
+void copy_h2d(void *host_ptr, void *device_ptr, size_t size) override {
+    cudaMemcpy(device_ptr, host_ptr, size, cudaMemcpyHostToDevice);
+  }
 
+  void copy_d2h(void *device_ptr, void *host_ptr, size_t size) override {
+    cudaMemcpy(host_ptr, device_ptr, size, cudaMemcpyDeviceToHost);
+  }
   std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) override {
     if (queue.empty())
       return nullptr;

@@ -2,6 +2,7 @@
 #include "lumen/op_registry.hpp"
 #include <iostream>
 #include <sstream>
+#include <cstring>
 
 namespace lumen {
 

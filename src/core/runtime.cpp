@@ -57,13 +57,25 @@ void *Buffer::data() {
 }
 
 // --- Runtime Implementation ---
+
 Runtime::Runtime() {
+  // Always initialize CPU backend
   backends_["cpu"] = create_cpu_backend();
+
 #ifdef LUMEN_USE_METAL
-  backends_["metal"] = create_metal_backend();
+  try {
+    backends_["metal"] = create_metal_backend();
+  } catch (const std::exception& e) {
+    std::cerr << "[Lumen] Warning: Metal initialization failed: " << e.what() << std::endl;
+  }
 #endif
+
 #ifdef LUMEN_USE_CUDA
-  backends_["cuda"] = create_cuda_backend();
+  try {
+    backends_["cuda"] = create_cuda_backend();
+  } catch (const std::exception& e) {
+    std::cerr << "[Lumen] Warning: CUDA initialization failed: " << e.what() << std::endl;
+  }
 #endif
 
   run_startup_benchmarks();

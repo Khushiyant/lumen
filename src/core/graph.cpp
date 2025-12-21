@@ -4,6 +4,7 @@
 #include <set>
 #include <sstream>
 #include <unordered_set>
+#include <cstring>
 
 namespace lumen {
 

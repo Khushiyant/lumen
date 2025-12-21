@@ -35,7 +35,9 @@ cd $BUILD_DIR
 # Configure and Build
 echo "Configuring and Building Lumen with Python Bindings..."
 # Pass the pybind11_DIR to CMake
-cmake .. -DCMAKE_BUILD_TYPE=Release -Dpybind11_DIR="${PYBIND11_PATH}"
+cmake .. -DCMAKE_BUILD_TYPE=Release \
+         -Dpybind11_DIR="${PYBIND11_PATH}" \
+         -DCMAKE_PREFIX_PATH="/usr/local"
 
 echo "Building with $NUM_CORES cores..."
 cmake --build . --parallel "$NUM_CORES"
