@@ -10,6 +10,9 @@ out/
 *.dll
 *.a
 *.lib
+*.pyc
+*.egg-info/
+__pycache__/
 
 # --- macOS Specific ---
 .DS_Store

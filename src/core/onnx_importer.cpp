@@ -182,13 +182,6 @@ ONNXImporter::import_model(const std::string &model_path) {
         tensor_map[node.output(0)] = output_tensor;
       }
     }
-
-    auto *output_tensor =
-        lumen_graph->add_op(op_type, inputs, attrs, node.name());
-
-    if (node.output_size() > 0) {
-      tensor_map[node.output(0)] = output_tensor;
-    }
   }
 
   // 4. Mark Outputs
