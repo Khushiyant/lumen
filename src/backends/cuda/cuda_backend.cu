@@ -108,8 +108,14 @@ public:
   ~CUDABackend() {
     if (cublas_handle_)
       cublasDestroy(cublas_handle_);
-  }
 
+    auto blocks = pool_.drain();
+    for (auto &block : blocks) {
+      // Explicitly free the managed memory pointers
+      cudaFree(block.second);
+    }
+    std::cout << "[Lumen] CUDA Backend: Memory Pool Drained." << std::endl;
+  }
   Buffer *create_buffer(const std::vector<size_t> &shape) override {
     size_t total_elements = 1;
     for (auto d : shape)

@@ -1,6 +1,7 @@
 #include "lumen/lumen.hpp"
 #import <Accelerate/Accelerate.h>
 #import <Metal/Metal.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #include <cmath>
 #include <iostream>
@@ -39,6 +40,16 @@ public:
     command_queue_ = [device_ newCommandQueue];
     std::cout << "[Lumen] Metal Backend Initialized with Memory Pooling"
               << std::endl;
+  }
+
+  virtual ~MetalBackend() {
+    auto blocks = pool_.drain();
+    for (auto &block : blocks) {
+      // Hands control back to Objective-C ARC to trigger deallocation
+      id<MTLBuffer> buf = (__bridge_transfer id<MTLBuffer>)block.second;
+      buf = nil;
+    }
+    std::cout << "[Lumen] Metal Backend: Memory Pool Drained." << std::endl;
   }
 
   Buffer *create_buffer(const std::vector<size_t> &shape) override {
@@ -214,37 +225,33 @@ public:
           [NSMutableArray array];
       std::map<Buffer *, MPSGraphTensorData *> data_map;
 
-      // Keep track of temp buffers to release them after execution
-      NSMutableArray<id<MTLBuffer>> *temp_buffers = [NSMutableArray array];
-
       // Helper to create tensor data, handling offsets safely
+      // Optimized version in lumen/src/backends/gpu/metal_backend.mm
+      // Correct zero-copy implementation in
+      // lumen/src/backends/gpu/metal_backend.mm
       auto create_data_safe = [&](Buffer *buf) -> MPSGraphTensorData * {
         id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)buf->device_ptr();
 
-        if (buf->offset_bytes() > 0) {
-          size_t size = buf->size_bytes();
-          id<MTLBuffer> temp =
-              [device_ newBufferWithLength:size
-                                   options:MTLResourceStorageModeShared];
-
-          // Copy data: Since storage is Shared, we can just memcpy on CPU
-          float *src =
-              (float *)((char *)[mtl_buf contents] + buf->offset_bytes());
-          float *dst = (float *)[temp contents];
-          std::memcpy(dst, src, size);
-
-          [temp_buffers addObject:temp];
-          mtl_buf = temp;
+        NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
+        for (auto d : buf->shape()) {
+          [ns_shape addObject:@(d)];
         }
 
-        NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
-        for (auto d : buf->shape())
-          [ns_shape addObject:@(d)];
+        // 1. Create a descriptor for the multidimensional array
+        MPSNDArrayDescriptor *desc =
+            [MPSNDArrayDescriptor descriptorWithDataType:MPSDataTypeFloat32
+                                                   shape:ns_shape];
 
-        return
-            [[MPSGraphTensorData alloc] initWithMTLBuffer:mtl_buf
-                                                    shape:ns_shape
-                                                 dataType:MPSDataTypeFloat32];
+        // 2. Initialize an MPSNDArray using the buffer and the byte offset.
+        // This provides a zero-copy "view" into the existing VRAM.
+        MPSNDArray *ndarray =
+            [[MPSNDArray alloc] initWithBuffer:mtl_buf
+                                        offset:buf->offset_bytes()
+                                    descriptor:desc];
+
+        // 3. Return the Graph-compatible TensorData initialized from the
+        // NDArray
+        return [[MPSGraphTensorData alloc] initWithMPSNDArray:ndarray];
       };
 
       for (const auto &op : queue) {

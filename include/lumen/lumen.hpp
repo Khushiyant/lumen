@@ -11,14 +11,13 @@
 namespace lumen {
 
 // Pillar 1: Foundational Memory Pool (Optimized)
+// lumen/include/lumen/lumen.hpp
+
 class MemoryPool {
 public:
   void *acquire(size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);
-    // Find a block that is large enough (best fit)
     auto it = free_blocks_.lower_bound(size);
-
-    // Allow up to 20% overhead to reuse a block
     if (it != free_blocks_.end() && it->first <= size * 1.2) {
       void *ptr = it->second;
       free_blocks_.erase(it);
@@ -32,12 +31,21 @@ public:
     free_blocks_.insert({size, ptr});
   }
 
+  // NEW: Extracts all blocks from the pool so the backend can free them
+  std::vector<std::pair<size_t, void *>> drain() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::pair<size_t, void *>> blocks;
+    for (auto const &[size, ptr] : free_blocks_) {
+      blocks.push_back({size, ptr});
+    }
+    free_blocks_.clear();
+    return blocks;
+  }
+
 private:
-  // Size -> Pointer map for O(log N) search
   std::multimap<size_t, void *> free_blocks_;
   std::mutex mutex_;
 };
-
 // Pillar 2: Asynchronous Events
 class Event {
 public:

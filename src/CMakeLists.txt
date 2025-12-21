@@ -36,11 +36,10 @@ endif()
 # 3. Create the Library
 add_library(lumen SHARED ${LUMEN_SOURCES})
 
-# 4. Configure Include and Library Paths
+# 4. Configure Include Paths
 target_include_directories(lumen PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 if(APPLE)
-    # FIX: Explicitly add Homebrew include and library paths for the linker
     target_include_directories(lumen PRIVATE /opt/homebrew/include)
     target_link_directories(lumen PRIVATE /opt/homebrew/lib)
 endif()
@@ -50,7 +49,7 @@ target_include_directories(lumen PRIVATE
     ${ONNX_INCLUDE_DIRS}
 )
 
-# 5. Define Macros
+# 5. Define Macros and Link Libraries
 target_compile_definitions(lumen PRIVATE ONNX_ML=1)
 
 if(LUMEN_HAS_CUDA)
@@ -61,21 +60,24 @@ endif()
 if(APPLE)
     target_compile_definitions(lumen PUBLIC LUMEN_USE_METAL)
     
-    # FIX: Modern Accelerate definitions to suppress deprecation warnings
-    target_compile_definitions(lumen PRIVATE 
+    # FIXED: Made these PUBLIC so they propagate to examples and suppress warnings
+    target_compile_definitions(lumen PUBLIC 
         ACCELERATE_NEW_LAPACK 
         ACCELERATE_LAPACK_ILP64
     )
     
     set_source_files_properties(backends/gpu/metal_backend.mm PROPERTIES COMPILE_FLAGS "-x objective-c++ -fobjc-arc")
     
-    # Ensure protobuf and onnx are linked using full targets or names found in /opt/homebrew/lib
-    target_link_libraries(lumen PRIVATE 
+    # FIXED: Link frameworks as PUBLIC so executables can find the symbols
+    target_link_libraries(lumen PUBLIC 
         "-framework Metal" 
         "-framework Foundation" 
         "-framework Accelerate" 
         "-framework MetalPerformanceShaders" 
         "-framework MetalPerformanceShadersGraph"
+    )
+    
+    target_link_libraries(lumen PRIVATE 
         protobuf::libprotobuf
         onnx
         onnx_proto
@@ -88,9 +90,9 @@ else()
     endif()
     
     if(OpenBLAS_FOUND)
-        target_link_libraries(lumen PRIVATE ${OpenBLAS_LIBRARIES})
-        target_include_directories(lumen PRIVATE ${OpenBLAS_INCLUDE_DIRS})
-        target_compile_definitions(lumen PRIVATE LUMEN_USE_OPENBLAS)
+        target_link_libraries(lumen PUBLIC ${OpenBLAS_LIBRARIES})
+        target_include_directories(lumen PUBLIC ${OpenBLAS_INCLUDE_DIRS})
+        target_compile_definitions(lumen PUBLIC LUMEN_USE_OPENBLAS)
     endif()
     
     target_link_libraries(lumen PRIVATE 

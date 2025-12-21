@@ -3,7 +3,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
-#include <sstream> // Added for debugging
+#include <sstream>
 #include <vector>
 
 #ifdef __APPLE__
@@ -15,9 +15,10 @@
 namespace lumen {
 class CPUEvent : public Event {
 public:
-  void wait() override {} // Already done
+  void wait() override {}
   bool is_completed() override { return true; }
 };
+
 class CPUBackend : public Backend {
 public:
   CPUBackend() {
@@ -38,14 +39,9 @@ public:
     for (auto d : shape)
       total_elements *= d;
     size_t size = total_elements * sizeof(float);
-
-    // 1. Try to acquire from pool
     void *ptr = pool_.acquire(size);
-
-    // 2. Fallback to allocation if pool is empty
-    if (!ptr) {
+    if (!ptr)
       ptr = new float[total_elements];
-    }
 
     std::vector<size_t> strides(shape.size());
     size_t s = 1;
@@ -57,10 +53,8 @@ public:
   }
 
   void free_buffer(void *device_ptr, size_t size) override {
-    if (device_ptr) {
-      // Instead of deleting, return to pool
+    if (device_ptr)
       pool_.release(device_ptr, size);
-    }
   }
 
   void execute(const std::string &op_name, const std::vector<Buffer *> &inputs,
@@ -69,49 +63,42 @@ public:
     sync(q);
   }
 
-
   std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) override {
     for (const auto &op : queue) {
-      // 1. Parse the operation chain (e.g., "matmul_relu" -> ["matmul",
-      // "relu"])
       std::vector<std::string> sub_ops;
       std::string segment;
       std::stringstream ss(op.op_name);
-      while (std::getline(ss, segment, '_')) {
+      while (std::getline(ss, segment, '_'))
         sub_ops.push_back(segment);
-      }
 
-      // 2. Execute each sub-operation in the chain
       for (size_t i = 0; i < sub_ops.size(); ++i) {
         const std::string &current_op = sub_ops[i];
-        
-        // The first op uses the original inputs; subsequent ops use the output
-        // buffer as input
         std::vector<Buffer *> effective_inputs =
-        (i == 0) ? op.inputs : std::vector<Buffer *>{op.output};
+            (i == 0) ? op.inputs : std::vector<Buffer *>{op.output};
         float *out = (float *)op.output->data();
         size_t n = op.output->num_elements();
-
-        // DIAGNOSTIC PRINT
-        std::cout << "[CPU Debug] Executing: " << current_op << " for " << n
-                  << " elements." << std::endl;
-  
 
         if (current_op == "matmul") {
           float *A = (float *)effective_inputs[0]->data();
           float *B = (float *)effective_inputs[1]->data();
           int M = (int)effective_inputs[0]->shape()[0];
           int K = (int)effective_inputs[0]->shape()[1];
-          int N = (int)effective_inputs[1]->shape()[1];
+          bool trans_b = op.attrs.get_int("transB", 0);
+          int N = trans_b ? (int)effective_inputs[1]->shape()[0]
+                          : (int)effective_inputs[1]->shape()[1];
+
 #if defined(__APPLE__) || defined(LUMEN_USE_OPENBLAS)
-          cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, M, N, K, 1.0f,
-                      A, K, B, N, 0.0f, out, N);
+          cblas_sgemm(CblasRowMajor, CblasNoTrans,
+                      trans_b ? CblasTrans : CblasNoTrans, M, N, K, 1.0f, A, K,
+                      B, trans_b ? K : N, 0.0f, out, N);
 #else
           for (int m = 0; m < M; ++m)
             for (int j = 0; j < N; ++j) {
               float sum = 0;
-              for (int k = 0; k < K; ++k)
-                sum += A[m * K + k] * B[k * N + j];
+              for (int k = 0; k < K; ++k) {
+                float val_b = trans_b ? B[j * K + k] : B[k * N + j];
+                sum += A[m * K + k] * val_b;
+              }
               out[m * N + j] = sum;
             }
 #endif
@@ -187,21 +174,6 @@ public:
               }
             }
           }
-        } else if (current_op == "global_average_pool") {
-          float *in = (float *)effective_inputs[0]->data();
-          auto &s = effective_inputs[0]->shape();
-          int N = s[0], C = s[1], HW = s[2] * s[3];
-          float inv_hw = 1.0f / HW;
-          for (int batch = 0; batch < N; ++batch) {
-            for (int c = 0; c < C; ++c) {
-              float sum = 0;
-              for (int j = 0; j < HW; ++j)
-                sum += in[(batch * C + c) * HW + j];
-              out[batch * C + c] = sum * inv_hw;
-            }
-          }
-        } else {
-          throw std::runtime_error("Unsupported sub-op: " + current_op);
         }
       }
     }
@@ -212,5 +184,4 @@ public:
 std::unique_ptr<Backend> create_cpu_backend() {
   return std::make_unique<CPUBackend>();
 }
-
 } // namespace lumen

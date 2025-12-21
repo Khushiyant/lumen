@@ -59,7 +59,6 @@ std::string map_onnx_op(const std::string &onnx_op) {
   if (onnx_op == "Tanh")
     return "tanh";
 
-  // Fallback: just lowercase it
   std::string lower = onnx_op;
   std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
   return lower;
@@ -69,14 +68,12 @@ std::unique_ptr<Graph>
 ONNXImporter::import_model(const std::string &model_path) {
   auto lumen_graph = std::make_unique<Graph>();
 
-  // 1. Load ONNX Model using Protobuf
   onnx::ModelProto model;
   std::ifstream in(model_path, std::ios::ate | std::ios::binary);
   if (!in.is_open()) {
     throw GraphException("Could not open ONNX model: " + model_path);
   }
 
-  std::streamsize size = in.tellg();
   in.seekg(0, std::ios::beg);
   if (!model.ParseFromIstream(&in)) {
     throw GraphException("Failed to parse ONNX protobuf.");
@@ -85,14 +82,13 @@ ONNXImporter::import_model(const std::string &model_path) {
   const auto &onnx_graph = model.graph();
   std::map<std::string, TensorDescriptor *> tensor_map;
 
-  // 2. Import Initializers (Weights)
+  // 1. Import Initializers (Weights)
   for (const auto &initializer : onnx_graph.initializer()) {
     std::vector<size_t> shape;
     for (auto dim : initializer.dims()) {
       shape.push_back(static_cast<size_t>(dim));
     }
 
-    // Handle raw data or float_data depending on ONNX storage
     const float *data_ptr = nullptr;
     std::vector<float> data_vec;
 
@@ -109,7 +105,7 @@ ONNXImporter::import_model(const std::string &model_path) {
     tensor_map[initializer.name()] = t;
   }
 
-  // 3. Import Inputs (excluding those that are weights)
+  // 2. Import Inputs
   for (const auto &input : onnx_graph.input()) {
     if (tensor_map.count(input.name()))
       continue;
@@ -117,7 +113,6 @@ ONNXImporter::import_model(const std::string &model_path) {
     std::vector<size_t> shape;
     const auto &type = input.type().tensor_type();
     for (const auto &dim : type.shape().dim()) {
-      // ONNX may use -1 for dynamic dims; default to 1 for static runtime
       shape.push_back(dim.has_dim_value() ? dim.dim_value() : 1);
     }
 
@@ -126,7 +121,7 @@ ONNXImporter::import_model(const std::string &model_path) {
     tensor_map[input.name()] = t;
   }
 
-  // 4. Import Nodes (Operations)
+  // 3. Import Nodes
   for (const auto &node : onnx_graph.node()) {
     std::vector<TensorDescriptor *> inputs;
     for (const auto &input_name : node.input()) {
@@ -135,42 +130,57 @@ ONNXImporter::import_model(const std::string &model_path) {
       }
     }
 
-    // Map Attributes
     OpAttributes attrs;
     for (const auto &attr : node.attribute()) {
+      // Map ONNX attribute names to Lumen expected names
+      std::string lumen_attr_name = attr.name();
+      if (lumen_attr_name == "pads")
+        lumen_attr_name = "padding";
+      else if (lumen_attr_name == "strides")
+        lumen_attr_name = "stride";
+      else if (lumen_attr_name == "dilations")
+        lumen_attr_name = "dilation";
+      else if (lumen_attr_name == "kernel_shape")
+        lumen_attr_name = "kernel_size";
+
       if (attr.has_i())
-        attrs.int_attrs[attr.name()] = attr.i();
+        attrs.int_attrs[lumen_attr_name] = attr.i();
       else if (attr.has_f())
-        attrs.float_attrs[attr.name()] = attr.f();
+        attrs.float_attrs[lumen_attr_name] = attr.f();
       else if (attr.has_s())
-        attrs.string_attrs[attr.name()] = attr.s();
+        attrs.string_attrs[lumen_attr_name] = attr.s();
       else if (attr.ints_size() > 0) {
         std::vector<int> vals;
         for (auto v : attr.ints())
           vals.push_back(static_cast<int>(v));
-        attrs.int_array_attrs[attr.name()] = vals;
+        attrs.int_array_attrs[lumen_attr_name] = vals;
       }
     }
 
     std::string op_type = map_onnx_op(node.op_type());
 
+    // For Gemm specifically, ONNX inputs include bias which Lumen doesn't
+    // handle in one matmul op. We truncate to first 2 inputs (A and B).
+    if (op_type == "matmul" && inputs.size() > 2) {
+      inputs.resize(2);
+    }
+
     auto *output_tensor =
         lumen_graph->add_op(op_type, inputs, attrs, node.name());
 
-    // Register the first output of the node in the map
     if (node.output_size() > 0) {
       tensor_map[node.output(0)] = output_tensor;
     }
   }
 
-  // 5. Mark Outputs
+  // 4. Mark Outputs
   for (const auto &output : onnx_graph.output()) {
     if (tensor_map.count(output.name())) {
       lumen_graph->mark_output(tensor_map[output.name()]);
     }
   }
 
-  std::cout << "[ONNX] Successfully imported model from: " << model_path
+  std::cout << "[ONNX] Successfully imported model: " << model_path
             << std::endl;
   return lumen_graph;
 }

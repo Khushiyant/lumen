@@ -15,7 +15,6 @@ namespace lumen {
 
 enum class DataType { FLOAT32, FLOAT16, INT8, INT32, INT64, BOOL };
 
-// Extended QueuedOp with attributes for graph execution
 struct QueuedOpWithAttrs {
   std::string op_name;
   std::vector<Buffer *> inputs;
@@ -25,7 +24,7 @@ struct QueuedOpWithAttrs {
 };
 
 // ============================================================================
-// TENSOR DESCRIPTOR (Graph-level tensor representation)
+// TENSOR DESCRIPTOR
 // ============================================================================
 
 class TensorDescriptor {
@@ -48,7 +47,7 @@ public:
   }
 
   size_t size_bytes() const {
-    size_t elem_size = 4; // Default float32
+    size_t elem_size = 4;
     switch (dtype_) {
     case DataType::FLOAT32:
       elem_size = 4;
@@ -79,14 +78,14 @@ private:
 };
 
 struct TensorLiveness {
-  size_t first_use; // Index of the op that produces this tensor
-  size_t last_use;  // Index of the last op that consumes this tensor
+  size_t first_use;
+  size_t last_use;
   size_t size_bytes;
   std::string name;
 };
 
 // ============================================================================
-// GRAPH NODE (Represents a single operation)
+// GRAPH NODE
 // ============================================================================
 
 class GraphNode {
@@ -103,9 +102,7 @@ public:
   TensorDescriptor *output() const { return output_; }
   const OpAttributes &attrs() const { return attrs_; }
 
-  // Check if this node can be fused with the next node
   bool can_fuse_with(const GraphNode *next) const {
-    // Simple fusion rules (expand as needed)
     if (op_type_ == "conv2d" && next->op_type_ == "relu")
       return true;
     if (op_type_ == "conv2d" && next->op_type_ == "batchnorm")
@@ -115,7 +112,6 @@ public:
     return false;
   }
 
-  // Get fused operation name
   std::string get_fused_name(const GraphNode *next) const {
     return op_type_ + "_" + next->op_type_;
   }
@@ -129,7 +125,7 @@ private:
 };
 
 // ============================================================================
-// SHAPE INFERENCE ENGINE
+// SHAPE INFERENCE ENGINE (Corrected: Methods made Public)
 // ============================================================================
 
 class ShapeInference {
@@ -139,7 +135,6 @@ public:
               const std::vector<TensorDescriptor *> &inputs,
               const OpAttributes &attrs);
 
-private:
   static std::vector<size_t>
   infer_conv2d(const std::vector<size_t> &input_shape,
                const std::vector<size_t> &weight_shape,
@@ -160,42 +155,34 @@ private:
 };
 
 // ============================================================================
-// GRAPH (Computation Graph Builder & Optimizer)
+// GRAPH
 // ============================================================================
 
 class Graph {
 public:
   Graph() : node_counter_(0), tensor_counter_(0) {}
 
-  // Build graph: Add inputs
   TensorDescriptor *add_input(const std::string &name,
                               const std::vector<size_t> &shape,
                               DataType dtype = DataType::FLOAT32);
 
-  // Build graph: Add operation
   TensorDescriptor *add_op(const std::string &op_type,
                            const std::vector<TensorDescriptor *> &inputs,
                            const OpAttributes &attrs = {},
                            const std::string &name = "");
 
-  // Build graph: Add weight/parameter
   TensorDescriptor *add_weight(const std::string &name,
                                const std::vector<size_t> &shape,
                                const float *data = nullptr);
 
-  // Mark output tensors
   void mark_output(TensorDescriptor *tensor);
-
-  // Optimization passes
   void optimize();
   void fuse_operations();
   void eliminate_dead_code();
   void optimize_memory_layout();
 
-  // Compilation
   class ExecutableGraph *compile(Runtime *rt);
 
-  // Introspection
   const std::vector<std::unique_ptr<GraphNode>> &nodes() const {
     return nodes_;
   }
@@ -208,7 +195,6 @@ public:
     return weight_data_;
   }
 
-  // Debugging
   void print_summary() const;
   std::string to_string() const;
 
@@ -226,14 +212,13 @@ private:
   std::string generate_node_name() {
     return "node_" + std::to_string(node_counter_++);
   }
-
   std::string generate_tensor_name() {
     return "tensor_" + std::to_string(tensor_counter_++);
   }
 };
 
 // ============================================================================
-// EXECUTABLE GRAPH (Compiled, optimized, ready-to-run graph)
+// EXECUTABLE GRAPH
 // ============================================================================
 
 class ExecutableGraph {
@@ -241,17 +226,11 @@ public:
   ExecutableGraph(Runtime *rt, const Graph *graph);
   ~ExecutableGraph();
 
-  // Execute inference
   std::vector<Buffer *> execute(const std::vector<Buffer *> &inputs);
-
-  // Execute with custom output buffers (advanced)
   void execute(const std::vector<Buffer *> &inputs,
                const std::vector<Buffer *> &outputs);
-
-  // Memory management
   size_t get_memory_usage() const { return total_memory_bytes_; }
 
-  // Profiling
   struct ProfilingData {
     std::string node_name;
     std::string op_type;
@@ -262,31 +241,20 @@ public:
 
 private:
   Runtime *runtime_;
-
-  // Execution plan
   std::vector<QueuedOpWithAttrs> execution_plan_;
-
-  // Buffer management
   std::map<std::string, Buffer *> intermediate_buffers_;
   std::map<std::string, Buffer *> weight_buffers_;
   std::vector<Buffer *> output_buffers_;
-
   size_t total_memory_bytes_;
 
   void analyze_liveness(const Graph *graph,
                         std::map<std::string, TensorLiveness> &liveness);
-  void plan_memory_reuse(const std::map<std::string, TensorLiveness> &liveness);
   void allocate_buffers(const Graph *graph);
   void load_weights(const Graph *graph);
   void build_execution_plan(const Graph *graph);
-
   Buffer *get_or_create_buffer(const std::string &name,
                                const std::vector<size_t> &shape);
 };
-
-// ============================================================================
-// EXCEPTIONS
-// ============================================================================
 
 class GraphException : public std::runtime_error {
 public:

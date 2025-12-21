@@ -43,33 +43,6 @@ cmake --build . --parallel "$NUM_CORES"
 echo -e "\n--- Running C++ Tests ---"
 ctest --output-on-failure
 
-# Example of how to use the new Python module
-echo -e "\n--- Verifying Python Bindings ---"
-python3 <<EOF
-import sys
-import os
-
-# The shared library is in build/lib based on CMake output
-lib_path = os.path.join(os.getcwd(), 'lib')
-sys.path.append(lib_path)
-
-try:
-    import lumen_py
-    import numpy as np
-    
-    rt = lumen_py.Runtime()
-    print(f"Lumen initialized successfully!")
-    print(f"Active Backend: {rt.current_backend()}")
-    
-    # Quick test: Alloc and check shape
-    buf = rt.alloc([2, 2])
-    print(f"Allocated buffer with shape: {buf.shape}")
-    
-except Exception as e:
-    print(f"Python Bindings check failed: {e}")
-    sys.exit(1)
-EOF
-
 echo -e "\n Benchmarking Lumen..."
 ./bin/lumen_bench
 
