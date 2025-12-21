@@ -23,6 +23,11 @@ Buffer::Buffer(const std::vector<size_t> &shape,
       host_ptr_(host_ptr), offset_(offset), creator_(creator) {}
 
 Buffer::~Buffer() {
+  // If we have pending work on this buffer, wait for it before destruction
+  if (last_write_event_) {
+    last_write_event_->wait();
+  }
+
   if (!is_view_ && runtime_context_) {
     runtime_context_->wait_all(); // Ensure work is done before freeing
   }
@@ -39,6 +44,8 @@ Buffer *Buffer::view(const std::vector<size_t> &new_shape,
                          creator_, offset_ + new_offset);
   v->is_view_ = true;
   v->set_runtime(this->runtime_context_);
+  // View shares the dependency of the parent
+  v->set_last_event(this->last_write_event_);
   return v;
 }
 
@@ -49,18 +56,16 @@ void *Buffer::data() {
   return (char *)host_ptr_ + (offset_ * sizeof(float));
 }
 
-
 // --- Runtime Implementation ---
 Runtime::Runtime() {
   backends_["cpu"] = create_cpu_backend();
-  #ifdef LUMEN_USE_METAL
+#ifdef LUMEN_USE_METAL
   backends_["metal"] = create_metal_backend();
-  #endif
-  #ifdef LUMEN_USE_CUDA
+#endif
+#ifdef LUMEN_USE_CUDA
   backends_["cuda"] = create_cuda_backend();
-  
-  #endif
-  
+#endif
+
   run_startup_benchmarks();
   active_backend_name_ = "dynamic";
   active_backend_ = nullptr;
@@ -76,8 +81,7 @@ void Runtime::run_startup_benchmarks() {
     auto *tA = backend->create_buffer({dim, dim});
     auto *tB = backend->create_buffer({dim, dim});
     auto *tC = backend->create_buffer({dim, dim});
-    
-    // FIXED: Create a named variable to resolve the lvalue reference error
+
     QueuedOp startup_op;
     startup_op.op_name = "matmul";
     startup_op.inputs = {tA, tB};
@@ -86,37 +90,26 @@ void Runtime::run_startup_benchmarks() {
     std::vector<QueuedOp> startup_queue = {startup_op};
     auto ev = backend->sync(startup_queue);
 
-    QueuedOp add_op;
-    add_op.op_name = "add";
-    add_op.inputs = {tA, tB};
-    add_op.output = tC;
-    add_op.target_backend = name;
-    std::vector<QueuedOp> add_queue = {add_op};
-    backend->sync(add_queue);
-
     if (ev)
-    ev->wait();
-  
-  auto end = std::chrono::high_resolution_clock::now();
-  double ms = std::chrono::duration<double, std::milli>(end - start).count();
-  
-  // Store real throughput metrics
-  metrics_[name]["matmul"] = {ms, (double)(dim * dim * dim) / (ms * 1e3)};
-  delete tA;
-  delete tB;
-  delete tC;
-}
-}
+      ev->wait();
 
+    auto end = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+    metrics_[name]["matmul"] = {ms, (double)(dim * dim * dim) / (ms * 1e3)};
+    delete tA;
+    delete tB;
+    delete tC;
+  }
+}
 
 size_t Buffer::num_elements() const {
   size_t total = 1;
   for (auto d : shape_)
-  total *= d;
-return total;
+    total *= d;
+  return total;
 }
 
-// Update size_bytes to use num_elements
 size_t Buffer::size_bytes() const { return num_elements() * sizeof(float); }
 
 void Runtime::execute(const std::string &op_name,
@@ -132,6 +125,19 @@ void Runtime::execute(const std::string &op_name,
     for (auto &[n, p] : backends_)
       if (p.get() == target)
         target_name = n;
+  }
+
+  // --- CROSS-BACKEND SYNCHRONIZATION ---
+  // If any input is still being processed by a different backend (or has a
+  // pending event), we must wait for it to ensure data consistency.
+  for (auto *in : inputs) {
+    if (in->get_last_event()) {
+      // In a more complex system, we would insert a barrier.
+      // For now, we wait on the host to ensure safety.
+      if (!in->get_last_event()->is_completed()) {
+        in->get_last_event()->wait();
+      }
+    }
   }
 
   QueuedOp op;
@@ -155,8 +161,6 @@ std::vector<std::shared_ptr<Event>> Runtime::submit() {
   std::vector<std::shared_ptr<Event>> new_events;
   size_t i = 0;
   while (i < current_queue.size()) {
-    // FIXED: 'target' and 'group' are now correctly declared within the loop
-    // scope
     std::string target = current_queue[i].target_backend;
     std::vector<QueuedOp> group;
 
@@ -171,6 +175,11 @@ std::vector<std::shared_ptr<Event>> Runtime::submit() {
       if (ev) {
         new_events.push_back(ev);
         inflight_events_.push_back(ev);
+
+        // Tag outputs with this event for future synchronization
+        for (auto &op : group) {
+          op.output->set_last_event(ev);
+        }
       }
     }
 
@@ -207,6 +216,8 @@ void Runtime::set_backend(const std::string &name) {
   } else if (name == "dynamic") {
     active_backend_ = nullptr;
     active_backend_name_ = "dynamic";
+  } else {
+    throw std::runtime_error("Backend not found: " + name);
   }
 }
 

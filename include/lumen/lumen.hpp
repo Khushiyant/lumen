@@ -10,31 +10,31 @@
 
 namespace lumen {
 
-// Pillar 1: Foundational Memory Pool
+// Pillar 1: Foundational Memory Pool (Optimized)
 class MemoryPool {
 public:
-  struct Block {
-    void *ptr;
-    size_t size;
-  };
   void *acquire(size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto it = free_blocks_.begin(); it != free_blocks_.end(); ++it) {
-      if (it->size >= size && it->size <= size * 1.2) {
-        void *ptr = it->ptr;
-        free_blocks_.erase(it);
-        return ptr;
-      }
+    // Find a block that is large enough (best fit)
+    auto it = free_blocks_.lower_bound(size);
+
+    // Allow up to 20% overhead to reuse a block
+    if (it != free_blocks_.end() && it->first <= size * 1.2) {
+      void *ptr = it->second;
+      free_blocks_.erase(it);
+      return ptr;
     }
     return nullptr;
   }
+
   void release(void *ptr, size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);
-    free_blocks_.push_back({ptr, size});
+    free_blocks_.insert({size, ptr});
   }
 
 private:
-  std::list<Block> free_blocks_;
+  // Size -> Pointer map for O(log N) search
+  std::multimap<size_t, void *> free_blocks_;
   std::mutex mutex_;
 };
 
@@ -60,7 +60,6 @@ struct OpAttributes {
   std::map<std::string, std::string> string_attrs;
   std::map<std::string, bool> bool_attrs;
 
-  // Convenience getters with defaults
   int get_int(const std::string &key, int default_val = 0) const {
     auto it = int_attrs.find(key);
     return it != int_attrs.end() ? it->second : default_val;
@@ -86,7 +85,7 @@ struct QueuedOp {
   std::string op_name;
   std::vector<Buffer *> inputs;
   Buffer *output;
-  OpAttributes attrs; 
+  OpAttributes attrs;
   std::string target_backend;
 };
 
@@ -121,19 +120,21 @@ public:
   const std::vector<size_t> &strides() const { return strides_; }
   size_t num_elements() const;
   size_t size_bytes() const;
-  void *device_handle() const {
-    return (char *)device_ptr_ + (offset_ * sizeof(float));
-  }
+
   Backend *creator() const { return creator_; }
   Buffer *view(const std::vector<size_t> &new_shape,
                const std::vector<size_t> &new_strides, size_t new_offset = 0);
   void set_location(BufferLocation loc) { location_ = loc; }
   BufferLocation location() const { return location_; }
-  void *device_handle_base() const { return device_ptr_; }
 
+  // Accessors for raw device memory and offset
+  void *device_ptr() const { return device_ptr_; }
   size_t offset() const { return offset_; }
   size_t offset_bytes() const { return offset_ * sizeof(float); }
-  void *device_ptr() const { return device_ptr_; }
+
+  // Synchronization tracking
+  void set_last_event(std::shared_ptr<Event> ev) { last_write_event_ = ev; }
+  std::shared_ptr<Event> get_last_event() const { return last_write_event_; }
 
 private:
   std::vector<size_t> shape_;
@@ -145,6 +146,9 @@ private:
   Runtime *runtime_context_ = nullptr;
   BufferLocation location_ = BufferLocation::BOTH_SYNCED;
   bool is_view_ = false;
+
+  // Tracks the last operation that wrote to this buffer
+  std::shared_ptr<Event> last_write_event_;
 };
 
 class Router {

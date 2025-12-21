@@ -18,7 +18,14 @@ void print_metrics(const std::string &name, std::chrono::nanoseconds duration) {
 void test_cpu_fallback() {
   lumen::Runtime rt;
   std::cout << "[Test] Switching to CPU Backend..." << std::endl;
-  rt.set_backend("cpu");
+
+  try {
+    rt.set_backend("cpu");
+  } catch (...) {
+    std::cout << "SKIPPED: CPU backend not found (should not happen)."
+              << std::endl;
+    return;
+  }
 
   if (rt.current_backend() != "cpu") {
     std::cout << "SKIPPED: CPU backend not found (should not happen)."
@@ -50,7 +57,13 @@ void test_cpu_fallback() {
 // 2. Existing Metal Tests (Runs on default backend)
 void test_metal_features() {
   lumen::Runtime rt;
-  rt.set_backend("metal");
+
+  try {
+    rt.set_backend("metal");
+  } catch (...) {
+    // Silently skip if metal is not available
+    return;
+  }
 
   if (rt.current_backend() != "metal")
     return;
@@ -83,7 +96,14 @@ void benchmark_backend_comparison() {
   size_t dim = 4096;
 
   auto run_bench = [&](const std::string &backend) {
-    rt.set_backend(backend);
+    // FIX: Catch the exception if the backend is not available
+    try {
+      rt.set_backend(backend);
+    } catch (const std::exception &e) {
+      // Backend not compiled or not found
+      return;
+    }
+
     // Only run if the backend is actually active on this system
     if (rt.current_backend() != backend && backend != "cpu")
       return;
@@ -95,10 +115,12 @@ void benchmark_backend_comparison() {
     // Warmup: Build cache and ensure buffers are on device
     rt.execute("matmul", {A, B}, C);
     rt.submit();
+    rt.wait_all();
 
     auto start = std::chrono::high_resolution_clock::now();
     rt.execute("matmul", {A, B}, C);
     rt.submit(); // Measure true execution
+    rt.wait_all();
     auto end = std::chrono::high_resolution_clock::now();
 
     std::cout << "PASS: " << backend << " MatMul (" << dim << "x" << dim << ")"
@@ -194,7 +216,11 @@ void benchmark_inference_throughput() {
   // Simple CNN-like block
   auto *in = graph.add_input("in", {1, 3, 224, 224});
   auto *w = graph.add_weight("w", {64, 3, 3, 3});
-  auto *conv = graph.add_op("conv2d", {in, w});
+  lumen::OpAttributes attrs;
+  attrs.int_array_attrs["stride"] = {1, 1};
+  attrs.int_array_attrs["padding"] = {1, 1};
+
+  auto *conv = graph.add_op("conv2d", {in, w}, attrs);
   auto *out = graph.add_op("relu", {conv});
   graph.mark_output(out);
 
@@ -205,7 +231,7 @@ void benchmark_inference_throughput() {
   auto start = std::chrono::high_resolution_clock::now();
 
   for (int i = 0; i < 100; ++i) {
-    executable->execute({input_buf});
+    auto res = executable->execute({input_buf});
   }
 
   auto end = std::chrono::high_resolution_clock::now();

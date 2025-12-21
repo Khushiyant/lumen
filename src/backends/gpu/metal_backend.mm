@@ -10,7 +10,6 @@
 
 namespace lumen {
 
-// Event implementation for Metal to track command buffer status asynchronously
 class MetalEvent : public Event {
 public:
   MetalEvent(id<MTLCommandBuffer> cb) : cb_(cb) {}
@@ -48,16 +47,17 @@ public:
       total_elements *= d;
     size_t size = total_elements * sizeof(float);
 
-    // Try to acquire from the memory pool first
+    // Try to acquire from the memory pool
     void *device_ptr = pool_.acquire(size);
     id<MTLBuffer> buf = nil;
 
     if (device_ptr) {
+      // Re-cast the void* back to an Objective-C object
       buf = (__bridge id<MTLBuffer>)device_ptr;
     } else {
-      // Allocate new buffer if pool is empty
       buf = [device_ newBufferWithLength:size
                                  options:MTLResourceStorageModeShared];
+      // Bridge Retain: Increments ref count so ARC doesn't dealloc it
       device_ptr = (__bridge_retained void *)buf;
     }
 
@@ -68,13 +68,13 @@ public:
       s *= shape[i];
     }
 
+    // Host ptr is contents because storage mode is Shared
     return new Buffer(shape, strides, device_ptr, [buf contents], this, 0);
   }
 
-  // FIXED: Updated signature to match the virtual method in Backend base class
   void free_buffer(void *device_ptr, size_t size) override {
     if (device_ptr) {
-      // Return the block to the pool for reuse instead of immediate release
+      // Return it to the pool (still retained).
       pool_.release(device_ptr, size);
     }
   }
@@ -100,7 +100,6 @@ public:
             [NSMutableArray array];
 
         for (const auto &op : queue) {
-          // Parse "matmul_relu" -> ["matmul", "relu"]
           std::vector<std::string> sub_ops;
           std::string segment;
           std::stringstream ss(op.op_name);
@@ -191,12 +190,14 @@ public:
             [targetTensors addObject:current_res];
           }
         }
+
         NSMutableDictionary *typeFeeds = [NSMutableDictionary dictionary];
         for (MPSGraphTensor *ph in orderedPlaceholders) {
           typeFeeds[ph] =
               [[MPSGraphShapedType alloc] initWithShape:ph.shape
                                                dataType:ph.dataType];
         }
+
         MPSGraphExecutable *exe = [graph
                 compileWithDevice:[MPSGraphDevice deviceWithMTLDevice:device_]
                             feeds:typeFeeds
@@ -213,13 +214,47 @@ public:
           [NSMutableArray array];
       std::map<Buffer *, MPSGraphTensorData *> data_map;
 
+      // Keep track of temp buffers to release them after execution
+      NSMutableArray<id<MTLBuffer>> *temp_buffers = [NSMutableArray array];
+
+      // Helper to create tensor data, handling offsets safely
+      auto create_data_safe = [&](Buffer *buf) -> MPSGraphTensorData * {
+        id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)buf->device_ptr();
+
+        if (buf->offset_bytes() > 0) {
+          size_t size = buf->size_bytes();
+          id<MTLBuffer> temp =
+              [device_ newBufferWithLength:size
+                                   options:MTLResourceStorageModeShared];
+
+          // Copy data: Since storage is Shared, we can just memcpy on CPU
+          float *src =
+              (float *)((char *)[mtl_buf contents] + buf->offset_bytes());
+          float *dst = (float *)[temp contents];
+          std::memcpy(dst, src, size);
+
+          [temp_buffers addObject:temp];
+          mtl_buf = temp;
+        }
+
+        NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
+        for (auto d : buf->shape())
+          [ns_shape addObject:@(d)];
+
+        return
+            [[MPSGraphTensorData alloc] initWithMTLBuffer:mtl_buf
+                                                    shape:ns_shape
+                                                 dataType:MPSDataTypeFloat32];
+      };
+
       for (const auto &op : queue) {
         for (Buffer *buf : op.inputs) {
           if (!data_map.count(buf))
-            data_map[buf] = create_tensor_data(buf);
+            data_map[buf] = create_data_safe(buf);
         }
-        [resultsArray addObject:create_tensor_data(op.output)];
+        [resultsArray addObject:create_data_safe(op.output)];
       }
+
       std::set<Buffer *> seen;
       for (const auto &op : queue) {
         for (Buffer *buf : op.inputs) {
@@ -229,12 +264,15 @@ public:
           }
         }
       }
+
       [pipeline.executable runWithMTLCommandQueue:command_queue_
                                       inputsArray:inputsArray
                                      resultsArray:resultsArray
                               executionDescriptor:nil];
+
       id<MTLCommandBuffer> commandBuffer = [command_queue_ commandBuffer];
       [commandBuffer commit];
+
       return std::make_shared<MetalEvent>(commandBuffer);
     }
   }
@@ -259,25 +297,6 @@ private:
       ss << " ";
     }
     return ss.str();
-  }
-
-  // Change this method to correctly handle offsets
-  // lumen/src/backends/gpu/metal_backend.mm
-
-  // lumen/src/backends/gpu/metal_backend.mm
-
-  MPSGraphTensorData *create_tensor_data(Buffer *buf) {
-    NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
-    for (auto d : buf->shape())
-      [ns_shape addObject:@(d)];
-
-    // FIXED: Correctly cast the device_ptr back to an id<MTLBuffer> object
-    // without performing arithmetic on the object's memory address.
-    id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)buf->device_handle_base();
-
-    return [[MPSGraphTensorData alloc] initWithMTLBuffer:mtl_buf
-                                                   shape:ns_shape
-                                                dataType:MPSDataTypeFloat32];
   }
 };
 

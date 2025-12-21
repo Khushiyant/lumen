@@ -2,6 +2,7 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -42,6 +43,7 @@ __global__ void softmax_kernel(const float *input, float *output,
       out_row[i] /= sum;
   }
 }
+
 __global__ void conv2d_kernel(const float *input, const float *weight,
                               float *output, int N, int Ci, int H, int W,
                               int Co, int Kh, int Kw, int Ho, int Wo, int sh,
@@ -71,7 +73,6 @@ __global__ void conv2d_kernel(const float *input, const float *weight,
   }
 }
 
-// --- Pillar 2: CUDA Event Implementation ---
 class CUDAEvent : public Event {
 public:
   void wait() override { cudaDeviceSynchronize(); }
@@ -113,13 +114,12 @@ public:
     size_t total_elements = 1;
     for (auto d : shape)
       total_elements *= d;
-    size_t size = total_elements * sizeof(float); // DEFINES 'size'
+    size_t size = total_elements * sizeof(float);
 
     void *ptr = pool_.acquire(size);
     if (!ptr)
       cudaMallocManaged(&ptr, size);
 
-    // FIXED: 'strides' logic implemented correctly
     std::vector<size_t> strides(shape.size());
     size_t s = 1;
     for (int i = (int)shape.size() - 1; i >= 0; --i) {
@@ -141,6 +141,10 @@ public:
     sync(q);
   }
 
+  // Helper to resolve device pointer with offset safely
+  float *get_device_ptr(Buffer *b) {
+    return (float *)((char *)b->device_ptr() + b->offset_bytes());
+  }
 
   std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) override {
     if (queue.empty())
@@ -155,16 +159,17 @@ public:
 
       for (size_t i = 0; i < sub_ops.size(); ++i) {
         const std::string &current_op = sub_ops[i];
-        float *d_out = static_cast<float *>(op.output->device_handle());
+
+        // Output resolution
+        float *d_out = get_device_ptr(op.output);
         size_t n = op.output->num_elements();
+
         std::vector<Buffer *> effective_inputs =
             (i == 0) ? op.inputs : std::vector<Buffer *>{op.output};
 
         if (current_op == "add" || current_op == "mul") {
-          float *d_a =
-              static_cast<float *>(effective_inputs[0]->device_handle());
-          float *d_b =
-              static_cast<float *>(effective_inputs[1]->device_handle());
+          float *d_a = get_device_ptr(effective_inputs[0]);
+          float *d_b = get_device_ptr(effective_inputs[1]);
           int threads = 256;
           int blocks = (n + threads - 1) / threads;
           if (current_op == "add")
@@ -172,10 +177,8 @@ public:
           else
             mul_kernel<<<blocks, threads>>>(d_a, d_b, d_out, (int)n);
         } else if (current_op == "matmul") {
-          float *d_a =
-              static_cast<float *>(effective_inputs[0]->device_handle());
-          float *d_b =
-              static_cast<float *>(effective_inputs[1]->device_handle());
+          float *d_a = get_device_ptr(effective_inputs[0]);
+          float *d_b = get_device_ptr(effective_inputs[1]);
           int M = (int)effective_inputs[0]->shape()[0],
               K = (int)effective_inputs[0]->shape()[1],
               N = (int)effective_inputs[1]->shape()[1];
@@ -183,21 +186,19 @@ public:
           cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
                       d_b, N, d_a, K, &beta, d_out, N);
         } else if (current_op == "relu") {
-          // Launch in-place ReLU using existing mul_kernel or specialized one
-          int threads = 256;
-          int blocks = (n + threads - 1) / threads;
-          // For optimal ReLU, you'd add __global__ void relu_kernel(float*
-          // data, int n) to the top of cuda_backend.cu relu_kernel<<<blocks,
-          // threads>>>(d_out, (int)n);
+          // Basic inplace relu
+          float *d_in = get_device_ptr(effective_inputs[0]);
+          // Placeholder: in production, launch a relu kernel here
+          // Using simple mul with 1/0 is not efficient, needs custom kernel
         } else if (current_op == "softmax") {
-          float *d_in = (float *)effective_inputs[0]->device_handle();
+          float *d_in = get_device_ptr(effective_inputs[0]);
           int inner = (int)effective_inputs[0]->shape().back();
           int outer = (int)(n / inner);
           int threads = 256, blocks = (outer + threads - 1) / threads;
           softmax_kernel<<<blocks, threads>>>(d_in, d_out, outer, inner);
         } else if (current_op == "conv2d") {
-          float *d_in = (float *)effective_inputs[0]->device_handle();
-          float *d_w = (float *)effective_inputs[1]->device_handle();
+          float *d_in = get_device_ptr(effective_inputs[0]);
+          float *d_w = get_device_ptr(effective_inputs[1]);
           auto &in_s = effective_inputs[0]->shape();
           auto &w_s = effective_inputs[1]->shape();
           auto &out_s = op.output->shape();

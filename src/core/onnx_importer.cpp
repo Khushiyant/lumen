@@ -1,4 +1,5 @@
 #include "lumen/onnx_importer.hpp"
+#include <algorithm>
 #include <fstream>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <iostream>
@@ -25,6 +26,43 @@ DataType map_dtype(int onnx_type) {
   default:
     return DataType::FLOAT32;
   }
+}
+
+// Helper to map ONNX Op Types to Lumen Op Codes
+std::string map_onnx_op(const std::string &onnx_op) {
+  if (onnx_op == "Gemm" || onnx_op == "MatMul")
+    return "matmul";
+  if (onnx_op == "Conv")
+    return "conv2d";
+  if (onnx_op == "Relu")
+    return "relu";
+  if (onnx_op == "GlobalAveragePool")
+    return "global_average_pool";
+  if (onnx_op == "AveragePool")
+    return "avgpool2d";
+  if (onnx_op == "MaxPool")
+    return "maxpool2d";
+  if (onnx_op == "Softmax")
+    return "softmax";
+  if (onnx_op == "Flatten")
+    return "flatten";
+  if (onnx_op == "Reshape")
+    return "reshape";
+  if (onnx_op == "BatchNormalization")
+    return "batchnorm";
+  if (onnx_op == "Add")
+    return "add";
+  if (onnx_op == "Mul")
+    return "mul";
+  if (onnx_op == "Sigmoid")
+    return "sigmoid";
+  if (onnx_op == "Tanh")
+    return "tanh";
+
+  // Fallback: just lowercase it
+  std::string lower = onnx_op;
+  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+  return lower;
 }
 
 std::unique_ptr<Graph>
@@ -114,11 +152,7 @@ ONNXImporter::import_model(const std::string &model_path) {
       }
     }
 
-    // Lowercase op_type to match Lumen's internal registry (e.g., "Relu" ->
-    // "relu")
-    std::string op_type = node.op_type();
-    for (auto &c : op_type)
-      c = tolower(c);
+    std::string op_type = map_onnx_op(node.op_type());
 
     auto *output_tensor =
         lumen_graph->add_op(op_type, inputs, attrs, node.name());
