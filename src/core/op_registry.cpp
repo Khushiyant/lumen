@@ -38,6 +38,33 @@ inline size_t get_broadcast_index(size_t linear_idx,
   return in_idx;
 }
 
+inline size_t get_broadcast_offset(size_t linear_idx,
+                                   const std::vector<size_t> &out_shape,
+                                   const std::vector<size_t> &in_shape,
+                                   const std::vector<size_t> &in_strides) {
+  size_t offset = 0;
+  size_t remaining = linear_idx;
+  size_t out_stride = 1;
+
+  for (size_t i = 0; i < out_shape.size(); ++i)
+    out_stride *= out_shape[i];
+
+  for (size_t i = 0; i < out_shape.size(); ++i) {
+    out_stride /= out_shape[i];
+    size_t coord = remaining / out_stride;
+    remaining %= out_stride;
+
+    // Broadcasting logic: if input dim is 1 (or doesn't exist), stride is 0
+    size_t in_dim_idx = i + in_shape.size() - out_shape.size();
+    if (i >= (out_shape.size() - in_shape.size())) {
+      if (in_shape[in_dim_idx] > 1) {
+        offset += coord * in_strides[in_dim_idx];
+      }
+    }
+  }
+  return offset;
+}
+
 // ============================================================================
 // OPCONTEXT HELPERS
 // ============================================================================
@@ -116,16 +143,18 @@ void add_cpu(const OpContext &ctx) {
   const auto &b_s = ctx.inputs[1]->shape();
   const auto &out_s = ctx.output->shape();
 
-  // If shapes match exactly, use fast path
   if (a_s == b_s) {
+    // Fast path for identical shapes
     for (size_t i = 0; i < ctx.output_size(); ++i)
       out[i] = a[i] + b[i];
   } else {
-    // Broadpath path
+    // Broadcast path
     for (size_t i = 0; i < ctx.output_size(); ++i) {
-      size_t a_idx = get_broadcast_index(i, out_s, a_s);
-      size_t b_idx = get_broadcast_index(i, out_s, b_s);
-      out[i] = a[a_idx] + b[b_idx];
+      size_t a_off =
+          get_broadcast_offset(i, out_s, a_s, ctx.inputs[0]->strides());
+      size_t b_off =
+          get_broadcast_offset(i, out_s, b_s, ctx.inputs[1]->strides());
+      out[i] = a[a_off] + b[b_off];
     }
   }
 }

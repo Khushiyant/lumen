@@ -330,7 +330,6 @@ ExecutableGraph::~ExecutableGraph() {
   intermediate_buffers_.clear();
   weight_buffers_.clear();
 }
-// lumen/src/core/graph.cpp
 
 void ExecutableGraph::allocate_buffers(const Graph *graph) {
   std::map<std::string, TensorLiveness> liveness_map;
@@ -339,12 +338,12 @@ void ExecutableGraph::allocate_buffers(const Graph *graph) {
   std::multimap<size_t, std::shared_ptr<Buffer>> free_pool;
   std::map<std::string, std::shared_ptr<Buffer>> assignments;
 
-  size_t current_footprint = 0; // Track actual bytes in use
-  total_memory_bytes_ = 0;      // Track peak usage (High Water Mark)
+  size_t current_footprint = 0;
+  total_memory_bytes_ = 0; // This will track the Peak (High Water Mark)
 
-  const auto &nodes = graph->nodes();
-  for (size_t i = 0; i < nodes.size(); ++i) {
-    std::string out_name = nodes[i]->output()->name();
+  for (size_t i = 0; i < graph->nodes().size(); ++i) {
+    auto &node = graph->nodes()[i];
+    std::string out_name = node->output()->name();
     auto &liveness = liveness_map[out_name];
 
     std::shared_ptr<Buffer> buf;
@@ -353,25 +352,26 @@ void ExecutableGraph::allocate_buffers(const Graph *graph) {
     if (it != free_pool.end() && it->first < liveness.size_bytes * 2) {
       buf = it->second;
       free_pool.erase(it);
+      // Footprint doesn't increase; we reused a buffer
     } else {
-      buf = runtime_->alloc(nodes[i]->output()->shape());
+      buf = runtime_->alloc(node->output()->shape());
+      current_footprint += liveness.size_bytes;
     }
 
-    current_footprint += liveness.size_bytes; // Add to footprint for both new and reused buffers
-
-    if (current_footprint > total_memory_bytes_)
+    // Update high-water mark
+    if (current_footprint > total_memory_bytes_) {
       total_memory_bytes_ = current_footprint;
+    }
 
     assignments[out_name] = buf;
     intermediate_buffers_[out_name] = buf;
 
-    // Release buffers that have reached their last use
-    for (auto *input : nodes[i]->inputs()) {
+    // Important: Decrease footprint when a buffer is returned to the pool
+    for (auto *input : node->inputs()) {
       std::string in_name = input->name();
       if (liveness_map.count(in_name) && liveness_map[in_name].last_use == i) {
         free_pool.insert(
             {liveness_map[in_name].size_bytes, assignments[in_name]});
-        // Footprint decreases when a buffer is added back to the pool
         current_footprint -= liveness_map[in_name].size_bytes;
       }
     }

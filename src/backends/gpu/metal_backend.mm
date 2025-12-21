@@ -146,6 +146,8 @@ public:
             }
 
             if (sub_op == "add") {
+              // MPSGraph handles [1, 10] + [1, 28, 28, 10] automatically via
+              // broadcasting
               current_res = [graph additionWithPrimaryTensor:ins[0]
                                              secondaryTensor:ins[1]
                                                         name:nil];

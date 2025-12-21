@@ -159,10 +159,28 @@ ONNXImporter::import_model(const std::string &model_path) {
 
     std::string op_type = map_onnx_op(node.op_type());
 
-    // For Gemm specifically, ONNX inputs include bias which Lumen doesn't
-    // handle in one matmul op. We truncate to first 2 inputs (A and B).
-    if (op_type == "matmul" && inputs.size() > 2) {
-      inputs.resize(2);
+    if ((op_type == "matmul" || op_type == "conv2d") && inputs.size() > 2) {
+      // 1. Add the core operation with first two inputs (Data, Weights)
+      std::vector<TensorDescriptor *> core_inputs = {inputs[0], inputs[1]};
+      auto *core_output = lumen_graph->add_op(op_type, core_inputs, attrs,
+                                              node.name() + "_core");
+
+      // 2. Add an explicit 'add' operation for the bias (input[2])
+      // Broadcasting implemented in Step 1 will handle the bias shape
+      // automatically.
+      auto *final_output =
+          lumen_graph->add_op("add", {core_output, inputs[2]}, {}, node.name());
+
+      if (node.output_size() > 0) {
+        tensor_map[node.output(0)] = final_output;
+      }
+    } else {
+      // Standard path for ops without extra bias inputs
+      auto *output_tensor =
+          lumen_graph->add_op(op_type, inputs, attrs, node.name());
+      if (node.output_size() > 0) {
+        tensor_map[node.output(0)] = output_tensor;
+      }
     }
 
     auto *output_tensor =
