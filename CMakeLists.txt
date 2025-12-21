@@ -23,3 +23,6 @@ find_package(pybind11 REQUIRED)
 
 pybind11_add_module(lumen_py src/python/bindings.cpp)
 target_link_libraries(lumen_py PRIVATE lumen)
+
+
+file(COPY ${CMAKE_SOURCE_DIR}/models DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})

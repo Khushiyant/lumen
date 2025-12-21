@@ -48,3 +48,6 @@ echo -e "\n Benchmarking Lumen..."
 
 echo -e "\nGraph IR example build and run..."
 ./bin/lumen_graph_example
+
+echo -e "\nRunning Lumen Unit Tests..."
+./bin/lumen_unit_tests
