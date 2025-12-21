@@ -72,3 +72,6 @@ EOF
 
 echo -e "\n Benchmarking Lumen..."
 ./bin/lumen_bench
+
+echo -e "\nGraph IR example build and run..."
+./bin/lumen_graph_example

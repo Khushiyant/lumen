@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cmath>
 
+
 void test_ops() {
     lumen::Runtime rt;
     // Now passing explicit shapes

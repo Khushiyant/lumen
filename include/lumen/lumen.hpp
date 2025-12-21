@@ -68,12 +68,13 @@ class Backend {
 public:
   virtual ~Backend() = default;
   virtual Buffer *create_buffer(const std::vector<size_t> &shape) = 0;
-  virtual void free_buffer(void *device_ptr,
-                           size_t size) = 0; // Signature requires size
+  virtual void free_buffer(void *device_ptr, size_t size) = 0;
+
   virtual void execute(const std::string &op_name,
                        const std::vector<Buffer *> &inputs, Buffer *output) = 0;
-  virtual std::shared_ptr<Event>
-  sync(std::vector<QueuedOp> &queue) = 0; // Returns Event
+
+  virtual std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) = 0;
+
 protected:
   MemoryPool pool_;
 };
@@ -123,8 +124,10 @@ public:
   Runtime();
   ~Runtime();
   Buffer *alloc(const std::vector<size_t> &shape);
+
   void execute(const std::string &op_name, const std::vector<Buffer *> &inputs,
                Buffer *output);
+
   std::vector<std::shared_ptr<Event>> submit();
   void wait_all();
   void set_backend(const std::string &name);
@@ -135,7 +138,7 @@ private:
   std::map<std::string, std::unique_ptr<Backend>> backends_;
   std::map<std::string, std::map<std::string, BackendMetrics>> metrics_;
   std::vector<QueuedOp> queue_;
-  std::vector<std::shared_ptr<Event>> inflight_events_; // Tracks async tasks
+  std::vector<std::shared_ptr<Event>> inflight_events_;
   Backend *active_backend_;
   std::string active_backend_name_;
   std::unique_ptr<Router> router_;

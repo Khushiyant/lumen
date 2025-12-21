@@ -84,7 +84,12 @@ void Runtime::run_startup_benchmarks() {
     auto *tC = backend->create_buffer({dim, dim});
 
     // FIXED: Create a named variable to resolve the lvalue reference error
-    std::vector<QueuedOp> startup_queue = {{"matmul", {tA, tB}, tC, name}};
+    QueuedOp startup_op;
+    startup_op.op_name = "matmul";
+    startup_op.inputs = {tA, tB};
+    startup_op.output = tC;
+    startup_op.target_backend = name;
+    std::vector<QueuedOp> startup_queue = {startup_op};
     auto ev = backend->sync(startup_queue);
 
     if (ev)
@@ -115,7 +120,13 @@ void Runtime::execute(const std::string &op_name,
         target_name = n;
   }
 
-  queue_.push_back({op_name, inputs, output, target_name});
+  QueuedOp op;
+  op.op_name = op_name;
+  op.inputs = inputs;
+  op.output = output;
+  op.target_backend = target_name;
+  queue_.push_back(op);
+  
   output->set_location(BufferLocation::DEVICE_ONLY);
 }
 
