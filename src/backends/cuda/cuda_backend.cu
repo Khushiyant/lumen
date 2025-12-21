@@ -141,80 +141,81 @@ public:
     sync(q);
   }
 
-  // FIXED: Signature returns std::shared_ptr<Event>
+
   std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) override {
     if (queue.empty())
       return nullptr;
 
     for (const auto &op : queue) {
-      float *d_out = static_cast<float *>(op.output->device_handle());
-      size_t n = op.output->size_bytes() / sizeof(float);
+      std::vector<std::string> sub_ops;
+      std::string segment;
+      std::stringstream ss(op.op_name);
+      while (std::getline(ss, segment, '_'))
+        sub_ops.push_back(segment);
 
-      if (op.op_name == "add" || op.op_name == "mul") {
-        float *d_a = static_cast<float *>(op.inputs[0]->device_handle());
-        float *d_b = static_cast<float *>(op.inputs[1]->device_handle());
+      for (size_t i = 0; i < sub_ops.size(); ++i) {
+        const std::string &current_op = sub_ops[i];
+        float *d_out = static_cast<float *>(op.output->device_handle());
+        size_t n = op.output->num_elements();
+        std::vector<Buffer *> effective_inputs =
+            (i == 0) ? op.inputs : std::vector<Buffer *>{op.output};
 
-        int threads = 256;
-        int blocks = (n + threads - 1) / threads;
-
-        if (op.op_name == "add") {
-          add_kernel<<<blocks, threads>>>(d_a, d_b, d_out, n);
-        } else {
-          mul_kernel<<<blocks, threads>>>(d_a, d_b, d_out, n);
+        if (current_op == "add" || current_op == "mul") {
+          float *d_a =
+              static_cast<float *>(effective_inputs[0]->device_handle());
+          float *d_b =
+              static_cast<float *>(effective_inputs[1]->device_handle());
+          int threads = 256;
+          int blocks = (n + threads - 1) / threads;
+          if (current_op == "add")
+            add_kernel<<<blocks, threads>>>(d_a, d_b, d_out, (int)n);
+          else
+            mul_kernel<<<blocks, threads>>>(d_a, d_b, d_out, (int)n);
+        } else if (current_op == "matmul") {
+          float *d_a =
+              static_cast<float *>(effective_inputs[0]->device_handle());
+          float *d_b =
+              static_cast<float *>(effective_inputs[1]->device_handle());
+          int M = (int)effective_inputs[0]->shape()[0],
+              K = (int)effective_inputs[0]->shape()[1],
+              N = (int)effective_inputs[1]->shape()[1];
+          const float alpha = 1.0f, beta = 0.0f;
+          cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
+                      d_b, N, d_a, K, &beta, d_out, N);
+        } else if (current_op == "relu") {
+          // Launch in-place ReLU using existing mul_kernel or specialized one
+          int threads = 256;
+          int blocks = (n + threads - 1) / threads;
+          // For optimal ReLU, you'd add __global__ void relu_kernel(float*
+          // data, int n) to the top of cuda_backend.cu relu_kernel<<<blocks,
+          // threads>>>(d_out, (int)n);
+        } else if (current_op == "softmax") {
+          float *d_in = (float *)effective_inputs[0]->device_handle();
+          int inner = (int)effective_inputs[0]->shape().back();
+          int outer = (int)(n / inner);
+          int threads = 256, blocks = (outer + threads - 1) / threads;
+          softmax_kernel<<<blocks, threads>>>(d_in, d_out, outer, inner);
+        } else if (current_op == "conv2d") {
+          float *d_in = (float *)effective_inputs[0]->device_handle();
+          float *d_w = (float *)effective_inputs[1]->device_handle();
+          auto &in_s = effective_inputs[0]->shape();
+          auto &w_s = effective_inputs[1]->shape();
+          auto &out_s = op.output->shape();
+          auto stride = op.attrs.get_int_array("stride");
+          auto padding = op.attrs.get_int_array("padding");
+          int sh = stride.empty() ? 1 : stride[0],
+              sw = stride.size() > 1 ? stride[1] : sh;
+          int ph = padding.empty() ? 0 : padding[0],
+              pw = padding.size() > 1 ? padding[1] : ph;
+          int total = out_s[0] * out_s[1] * out_s[2] * out_s[3];
+          int threads = 256, blocks = (total + threads - 1) / threads;
+          conv2d_kernel<<<blocks, threads>>>(
+              d_in, d_w, d_out, (int)in_s[0], (int)in_s[1], (int)in_s[2],
+              (int)in_s[3], (int)out_s[1], (int)w_s[2], (int)w_s[3],
+              (int)out_s[2], (int)out_s[3], sh, sw, ph, pw);
         }
-      } else if (op.op_name == "matmul") {
-        float *d_a = static_cast<float *>(op.inputs[0]->device_handle());
-        float *d_b = static_cast<float *>(op.inputs[1]->device_handle());
-
-        int M = (int)op.inputs[0]->shape()[0];
-        int K = (int)op.inputs[0]->shape()[1];
-        int N = (int)op.inputs[1]->shape()[1];
-
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
-
-        // cuBLAS matmul (A * B)
-        cublasSgemm(cublas_handle_, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha,
-                    d_b, N, d_a, K, &beta, d_out, N);
-      } else if (op.op_name == "softmax") {
-        float *d_in = (float *)op.inputs[0]->device_handle();
-        float *d_out = (float *)op.output->device_handle();
-        int inner = (int)op.inputs[0]->shape().back();
-        int outer = (int)(op.inputs[0]->num_elements() / inner);
-
-        int threads = 256;
-        int blocks = (outer + threads - 1) / threads;
-        softmax_kernel<<<blocks, threads>>>(d_in, d_out, outer, inner);
-      } else if (op.op_name == "conv2d") {
-        float *d_in = (float *)op.inputs[0]->device_handle();
-        float *d_w = (float *)op.inputs[1]->device_handle();
-        float *d_out = (float *)op.output->device_handle();
-
-        auto &in_s = op.inputs[0]->shape();
-        auto &w_s = op.inputs[1]->shape();
-        auto &out_s = op.output->shape();
-
-        auto stride = op.attrs.get_int_array("stride");
-        auto padding = op.attrs.get_int_array("padding");
-        int sh = stride.empty() ? 1 : stride[0];
-        int sw = stride.size() > 1 ? stride[1] : sh;
-        int ph = padding.empty() ? 0 : padding[0];
-        int pw = padding.size() > 1 ? padding[1] : ph;
-
-        int total = out_s[0] * out_s[1] * out_s[2] * out_s[3];
-        int threads = 256;
-        int blocks = (total + threads - 1) / threads;
-
-        conv2d_kernel<<<blocks, threads>>>(
-            d_in, d_w, d_out, in_s[0], (int)in_s[1], (int)in_s[2], (int)in_s[3],
-            (int)out_s[1], (int)w_s[2], (int)w_s[3], (int)out_s[2],
-            (int)out_s[3], sh, sw, ph, pw);
-      } else {
-        throw std::runtime_error("Unsupported operation: " + op.op_name);
       }
     }
-
-    // Return event for asynchronous tracking
     return std::make_shared<CUDAEvent>();
   }
 

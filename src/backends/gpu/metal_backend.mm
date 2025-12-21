@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 
 namespace lumen {
@@ -84,17 +85,12 @@ public:
     this->sync(single_op_queue);
   }
 
-  // FIXED: Signature changed to return std::shared_ptr<Event>
   std::shared_ptr<Event> sync(std::vector<QueuedOp> &queue) override {
     if (queue.empty())
       return nullptr;
 
     @autoreleasepool {
       std::string cache_key = build_cache_key(queue);
-      NSMutableArray<MPSGraphTensorData *> *inputsArray =
-          [NSMutableArray array];
-      NSMutableArray<MPSGraphTensorData *> *targetData = [NSMutableArray array];
-
       if (pipeline_cache_.find(cache_key) == pipeline_cache_.end()) {
         MPSGraph *graph = [[MPSGraph alloc] init];
         std::map<Buffer *, MPSGraphTensor *> buffer_to_tensor;
@@ -104,134 +100,141 @@ public:
             [NSMutableArray array];
 
         for (const auto &op : queue) {
-          NSMutableArray<MPSGraphTensor *> *ins = [NSMutableArray array];
-          for (Buffer *buf : op.inputs) {
-            if (buffer_to_tensor.count(buf)) {
-              [ins addObject:buffer_to_tensor[buf]];
-            } else {
-              NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
-              for (auto d : buf->shape())
-                [ns_shape addObject:@(d)];
+          // Parse "matmul_relu" -> ["matmul", "relu"]
+          std::vector<std::string> sub_ops;
+          std::string segment;
+          std::stringstream ss(op.op_name);
+          while (std::getline(ss, segment, '_'))
+            sub_ops.push_back(segment);
 
-              MPSGraphTensor *ph =
-                  [graph placeholderWithShape:ns_shape
-                                     dataType:MPSDataTypeFloat32
-                                         name:nil];
-              [ins addObject:ph];
-              [orderedPlaceholders addObject:ph];
-              buffer_to_tensor[buf] = ph;
+          MPSGraphTensor *current_res = nil;
+          for (size_t i = 0; i < sub_ops.size(); ++i) {
+            const std::string &sub_op = sub_ops[i];
+            NSMutableArray<MPSGraphTensor *> *ins = [NSMutableArray array];
+
+            if (i == 0) {
+              for (Buffer *buf : op.inputs) {
+                if (buffer_to_tensor.count(buf))
+                  [ins addObject:buffer_to_tensor[buf]];
+                else {
+                  NSMutableArray<NSNumber *> *ns_shape = [NSMutableArray array];
+                  for (auto d : buf->shape())
+                    [ns_shape addObject:@(d)];
+                  MPSGraphTensor *ph =
+                      [graph placeholderWithShape:ns_shape
+                                         dataType:MPSDataTypeFloat32
+                                             name:nil];
+                  [ins addObject:ph];
+                  [orderedPlaceholders addObject:ph];
+                  buffer_to_tensor[buf] = ph;
+                }
+              }
+            } else {
+              [ins addObject:current_res];
+            }
+
+            if (sub_op == "add")
+              current_res = [graph additionWithPrimaryTensor:ins[0]
+                                             secondaryTensor:ins[1]
+                                                        name:nil];
+            else if (sub_op == "mul")
+              current_res = [graph multiplicationWithPrimaryTensor:ins[0]
+                                                   secondaryTensor:ins[1]
+                                                              name:nil];
+            else if (sub_op == "matmul")
+              current_res = [graph matrixMultiplicationWithPrimaryTensor:ins[0]
+                                                         secondaryTensor:ins[1]
+                                                                    name:nil];
+            else if (sub_op == "relu")
+              current_res = [graph reLUWithTensor:ins[0] name:nil];
+            else if (sub_op == "softmax")
+              current_res = [graph softMaxWithTensor:ins[0] axis:-1 name:nil];
+            else if (sub_op == "conv2d") {
+              auto strides = op.attrs.get_int_array("stride");
+              auto padding = op.attrs.get_int_array("padding");
+              MPSGraphConvolution2DOpDescriptor *desc =
+                  [MPSGraphConvolution2DOpDescriptor
+                      descriptorWithStrideInX:(strides.size() > 1 ? strides[1]
+                                                                  : 1)
+                                    strideInY:(strides.empty() ? 1 : strides[0])
+                                    dilationRateInX:1
+                              dilationRateInY:1
+                                       groups:1
+                                 paddingStyle:MPSGraphPaddingStyleExplicit
+                                   dataLayout:MPSGraphTensorNamedDataLayoutNCHW
+                                weightsLayout:
+                                    MPSGraphTensorNamedDataLayoutOIHW];
+              [desc setExplicitPaddingWithPaddingLeft:(padding.size() > 1
+                                                           ? padding[1]
+                                                           : 0)
+                                         paddingRight:(padding.size() > 1
+                                                           ? padding[1]
+                                                           : 0)
+                                           paddingTop:(padding.empty()
+                                                           ? 0
+                                                           : padding[0])
+                                           paddingBottom:(padding.empty()
+                                                              ? 0
+                                                              : padding[0])];
+              current_res = [graph convolution2DWithSourceTensor:ins[0]
+                                                   weightsTensor:ins[1]
+                                                      descriptor:desc
+                                                            name:nil];
+            } else if (sub_op == "global_average_pool") {
+              current_res = [graph meanOfTensor:ins[0]
+                                           axes:@[ @2, @3 ]
+                                           name:nil];
             }
           }
-
-          MPSGraphTensor *res = nil;
-          if (op.op_name == "add")
-            res = [graph additionWithPrimaryTensor:ins[0]
-                                   secondaryTensor:ins[1]
-                                              name:nil];
-          else if (op.op_name == "mul")
-            res = [graph multiplicationWithPrimaryTensor:ins[0]
-                                         secondaryTensor:ins[1]
-                                                    name:nil];
-          else if (op.op_name == "matmul")
-            res = [graph matrixMultiplicationWithPrimaryTensor:ins[0]
-                                               secondaryTensor:ins[1]
-                                                          name:nil];
-          else if (op.op_name == "softmax") {
-            // MPSGraph uses the 'axis' parameter. Last dimension is -1.
-            res = [graph softMaxWithTensor:ins[0] axis:-1 name:nil];
-          } else if (op.op_name == "conv2d") {
-            auto strides = op.attrs.get_int_array("stride");
-            auto padding = op.attrs.get_int_array("padding");
-
-            // FIX: Selector order is X then Y
-            MPSGraphConvolution2DOpDescriptor *desc =
-                [MPSGraphConvolution2DOpDescriptor
-                    descriptorWithStrideInX:(strides.size() > 1 ? strides[1]
-                                                                : 1)
-                                  strideInY:(strides.empty()
-                                                 ? 1
-                                                 : strides[0])dilationRateInX:1
-                            dilationRateInY:1
-                                     groups:1
-                               paddingStyle:MPSGraphPaddingStyleExplicit
-                                 dataLayout:MPSGraphTensorNamedDataLayoutNCHW
-                              weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
-
-            [desc
-                setExplicitPaddingWithPaddingLeft:(padding.size() > 1
-                                                       ? padding[1]
-                                                       : 0)
-                                     paddingRight:(padding.size() > 1
-                                                       ? padding[1]
-                                                       : 0)
-                                       paddingTop:(padding.empty() ? 0
-                                                                   : padding[0])
-                                       paddingBottom:(padding.empty()
-                                                          ? 0
-                                                          : padding[0])];
-
-            res = [graph convolution2DWithSourceTensor:ins[0]
-                                         weightsTensor:ins[1]
-                                            descriptor:desc
-                                                  name:nil];
-          } else if (op.op_name == "global_average_pool") {
-            res = [graph meanOfTensor:ins[0] axes:@[ @2, @3 ] name:nil];
-          }
-          if (res) {
-            buffer_to_tensor[op.output] = res;
-            [targetTensors addObject:res];
+          if (current_res) {
+            buffer_to_tensor[op.output] = current_res;
+            [targetTensors addObject:current_res];
           }
         }
-
         NSMutableDictionary *typeFeeds = [NSMutableDictionary dictionary];
         for (MPSGraphTensor *ph in orderedPlaceholders) {
           typeFeeds[ph] =
               [[MPSGraphShapedType alloc] initWithShape:ph.shape
                                                dataType:ph.dataType];
         }
-
         MPSGraphExecutable *exe = [graph
                 compileWithDevice:[MPSGraphDevice deviceWithMTLDevice:device_]
                             feeds:typeFeeds
                     targetTensors:targetTensors
                  targetOperations:nil
             compilationDescriptor:nil];
-
         pipeline_cache_[cache_key] = {exe, orderedPlaceholders};
       }
 
       const auto &pipeline = pipeline_cache_[cache_key];
-      std::map<Buffer *, MPSGraphTensorData *> current_data_map;
+      NSMutableArray<MPSGraphTensorData *> *inputsArray =
+          [NSMutableArray array];
+      NSMutableArray<MPSGraphTensorData *> *resultsArray =
+          [NSMutableArray array];
+      std::map<Buffer *, MPSGraphTensorData *> data_map;
 
       for (const auto &op : queue) {
         for (Buffer *buf : op.inputs) {
-          if (current_data_map.find(buf) == current_data_map.end()) {
-            current_data_map[buf] = create_tensor_data(buf);
-          }
+          if (!data_map.count(buf))
+            data_map[buf] = create_tensor_data(buf);
         }
-        [targetData addObject:create_tensor_data(op.output)];
+        [resultsArray addObject:create_tensor_data(op.output)];
       }
-
-      std::map<Buffer *, bool> seen;
+      std::set<Buffer *> seen;
       for (const auto &op : queue) {
         for (Buffer *buf : op.inputs) {
-          if (!seen[buf]) {
-            [inputsArray addObject:current_data_map[buf]];
-            seen[buf] = true;
+          if (seen.find(buf) == seen.end()) {
+            [inputsArray addObject:data_map[buf]];
+            seen.insert(buf);
           }
         }
       }
-
       [pipeline.executable runWithMTLCommandQueue:command_queue_
                                       inputsArray:inputsArray
-                                     resultsArray:targetData
+                                     resultsArray:resultsArray
                               executionDescriptor:nil];
-
       id<MTLCommandBuffer> commandBuffer = [command_queue_ commandBuffer];
       [commandBuffer commit];
-
-      // Returns the event handler instead of blocking the CPU with
-      // waitUntilCompleted
       return std::make_shared<MetalEvent>(commandBuffer);
     }
   }
