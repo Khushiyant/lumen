@@ -1,21 +1,9 @@
-Lumen is an intelligent, heterogeneous deep learning inference runtime designed for high-performance execution across various hardware backends, including CPU, CUDA, and Metal. It features a multi-layered architecture encompassing a low-level runtime for asynchronous execution, a middle-tier Graph IR for optimizations, and a high-level Python API with a PyTorch-like interface.
 
-### Project Analysis
 
-The Lumen project is organized into several key modules:
-
-* **Core Runtime**: Manages device memory via an optimized memory pool and handles asynchronous execution through event tracking.
-* **Intelligent Router**: Dynamically selects the most efficient backend (CPU, CUDA, or Metal) for specific operations based on kernel latency and throughput metrics.
-* **Graph IR and Optimization**: Represents computations as directed graphs, allowing for optimization passes such as operation fusion (e.g., fusing Conv2d and ReLU into a single kernel) and dead code elimination to reduce computational overhead.
-* **Memory Management**: Implements a memory planner that analyzes tensor liveness to reuse buffers, significantly reducing peak memory consumption.
-* **ONNX Integration**: Provides a native importer to convert ONNX models into Lumen’s internal Graph IR.
-* **Python Bindings**: Uses pybind11 to provide a high-level API with zero-copy NumPy integration, allowing for seamless transitions between Python-based model definitions and high-performance C++ execution.
-
-Benchmarking results indicate that the runtime's memory planner can achieve up to 50% VRAM savings by optimizing buffer reuse. Performance comparisons show significant speedups on GPU backends, with Metal completing matrix multiplications nearly twice as fast as the CPU reference.
-
----
+<img width="3584" height="1184" alt="Gemini_Generated_Image_cjx9nfcjx9nfcjx9" src="https://github.com/user-attachments/assets/36dd7d6f-c7e5-4632-8fba-3aaf31ef866d" />
 
 # Lumen: Intelligent Heterogeneous Deep Learning Runtime
+---
 
 Lumen is a lightweight, efficient deep learning inference engine designed to provide high-performance execution across CPU, NVIDIA CUDA, and Apple Metal backends.
 
